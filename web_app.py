@@ -24,9 +24,11 @@ from db import (
     audit,
     dashboard_stats,
     get_chat_info,
+    get_chat_member_stats,
     init_db,
     get_chat_settings,
     list_known_chats,
+    list_hidden_chats,
     list_inactive_members_for_web,
     list_members_for_web,
     list_system_admins,
@@ -35,10 +37,12 @@ from db import (
     set_admin_notifications,
     set_chat_settings,
     set_chat_tracked,
+    set_chat_hidden,
 )
 from settings_store import load_settings, save_settings
 from telethon_auth import TelethonAuthError, TelethonAuthManager
 from telethon_config import load_telethon_config, telethon_status
+from telegram_identity import UsernameResolveError, resolve_user_by_username
 from runtime_paths import DATA_DIR, DATABASE_PATH, load_or_create_web_secret, web_port, web_public_url
 
 load_dotenv()
@@ -156,6 +160,9 @@ def _new_session(username: str) -> str:
         "u": username,
         "exp": int(time.time()) + SESSION_TTL,
         "csrf": secrets.token_urlsafe(24),
+        # The current web credential is the owner console. Keeping the role in
+        # the signed session makes owner-only routes explicit and future-proof.
+        "role": "owner",
     }
     body = _b64(json.dumps(payload, separators=(",", ":")).encode())
     return f"{body}.{_sign(body)}"
@@ -174,6 +181,9 @@ def _read_session(request: Request) -> dict | None:
         return None
     if payload.get("u") != WEB_USERNAME or int(payload.get("exp", 0)) < int(time.time()):
         return None
+    # Sessions created by the previous release did not carry an explicit role.
+    # The only web credential in that release was the owner console.
+    payload.setdefault("role", "owner")
     return payload
 
 
@@ -191,6 +201,13 @@ def verify_csrf(request: Request, csrf: str) -> dict:
     return session
 
 
+def require_owner_session(request: Request) -> dict:
+    session = require_session(request)
+    if session.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Доступ только владельцу")
+    return session
+
+
 def render(request: Request, name: str, **context):
     session = _read_session(request)
     context.update(
@@ -201,6 +218,7 @@ def render(request: Request, name: str, **context):
             "owner_id": OWNER_ID,
             "web_username": WEB_USERNAME,
             "web_cookie_secure": WEB_COOKIE_SECURE,
+            "is_owner": bool(session and session.get("role") == "owner"),
         }
     )
     return templates.TemplateResponse(request=request, name=name, context=context)
@@ -217,7 +235,9 @@ def redirect(path: str, message: str | None = None) -> RedirectResponse:
 async def auth_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code == 401:
         return redirect("/login")
-    return render(request, "error.html", code=exc.status_code, message=exc.detail)
+    response = render(request, "error.html", code=exc.status_code, message=exc.detail)
+    response.status_code = exc.status_code
+    return response
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -275,6 +295,9 @@ async def admin_alias(request: Request):
 async def dashboard(request: Request, chat_id: int | None = None, msg: str | None = None):
     require_session(request)
     chats = list_known_chats(include_untracked=False)
+    visible_ids = {int(row["chat_id"]) for row in chats}
+    if chat_id is not None and int(chat_id) not in visible_ids:
+        chat_id = None
     selected = get_chat_info(chat_id) if chat_id is not None else None
     stats = dashboard_stats(chat_id)
     series = activity_series(chat_id, days=30)
@@ -303,6 +326,32 @@ async def chats_page(request: Request, msg: str | None = None):
     return render(request, "chats.html", chats=rows, msg=msg)
 
 
+@app.get("/chats/hidden", response_class=HTMLResponse)
+async def hidden_chats_page(request: Request, msg: str | None = None):
+    require_owner_session(request)
+    return render(request, "hidden_chats.html", chats=[dict(row) for row in list_hidden_chats()], msg=msg)
+
+
+@app.post("/chats/{chat_id}/hide")
+async def chat_hide(request: Request, chat_id: int, csrf: str = Form(...)):
+    require_owner_session(request)
+    verify_csrf(request, csrf)
+    if not set_chat_hidden(chat_id, True):
+        raise HTTPException(status_code=400, detail="Некорректный чат")
+    audit(f"web:{WEB_USERNAME}", "chat_hidden", str(chat_id))
+    return redirect("/chats", "Чат скрыт. Отслеживание и алерты отключены.")
+
+
+@app.post("/chats/{chat_id}/restore")
+async def chat_restore(request: Request, chat_id: int, csrf: str = Form(...)):
+    require_owner_session(request)
+    verify_csrf(request, csrf)
+    if not set_chat_hidden(chat_id, False):
+        raise HTTPException(status_code=400, detail="Некорректный чат")
+    audit(f"web:{WEB_USERNAME}", "chat_restored", str(chat_id))
+    return redirect("/chats/hidden", "Чат возвращён в список доступных. Отслеживание остаётся выключенным до ручного включения.")
+
+
 @app.post("/chats/{chat_id}/track")
 async def chat_track(request: Request, chat_id: int, csrf: str = Form(...), enabled: int = Form(...)):
     verify_csrf(request, csrf)
@@ -318,8 +367,8 @@ async def chat_track(request: Request, chat_id: int, csrf: str = Form(...), enab
 async def chat_sync(request: Request, chat_id: int, csrf: str = Form(...)):
     verify_csrf(request, csrf)
     info = get_chat_info(chat_id)
-    if not info or info.get("chat_type") not in {"group", "supergroup"}:
-        raise HTTPException(status_code=400, detail="Некорректный чат")
+    if not info or info.get("chat_type") not in {"group", "supergroup"} or int(info.get("is_hidden") or 0):
+        raise HTTPException(status_code=400, detail="Некорректный или скрытый чат")
     request_sync(chat_id, f"web:{WEB_USERNAME}", "full")
     audit(f"web:{WEB_USERNAME}", "sync_requested", str(chat_id))
     return redirect("/chats", "Синхронизация поставлена в очередь")
@@ -338,8 +387,8 @@ async def chat_settings_submit(
 ):
     verify_csrf(request, csrf)
     info = get_chat_info(chat_id)
-    if not info or info.get("chat_type") not in {"group", "supergroup"}:
-        raise HTTPException(status_code=400, detail="Некорректный чат")
+    if not info or info.get("chat_type") not in {"group", "supergroup"} or int(info.get("is_hidden") or 0):
+        raise HTTPException(status_code=400, detail="Некорректный или скрытый чат")
     set_chat_settings(
         chat_id,
         inactivity_days=inactivity_days,
@@ -362,6 +411,9 @@ async def members_page(
 ):
     require_session(request)
     chats = list_known_chats(include_untracked=False)
+    visible_ids = {int(row["chat_id"]) for row in chats}
+    if chat_id is not None and int(chat_id) not in visible_ids:
+        chat_id = None
     if chat_id is None and chats:
         chat_id = int(chats[0]["chat_id"])
     if chat_id is None:
@@ -395,18 +447,45 @@ async def admins_page(request: Request, msg: str | None = None):
 async def admins_add(
     request: Request,
     csrf: str = Form(...),
-    user_id: int = Form(...),
-    display_name: str = Form(""),
+    user_id: str = Form(""),
     username: str = Form(""),
+    display_name: str = Form(""),
 ):
+    require_owner_session(request)
     verify_csrf(request, csrf)
-    add_system_admin(
-        user_id,
-        display_name=display_name.strip() or None,
-        username=username.strip().lstrip("@") or None,
+    raw_id = user_id.strip()
+    raw_username = username.strip().lstrip("@")
+
+    resolved = None
+    if raw_username:
+        try:
+            resolved = await resolve_user_by_username(raw_username)
+        except UsernameResolveError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        target_id = int(resolved["user_id"])
+        target_username = str(resolved.get("username") or raw_username).lstrip("@")
+        target_name = display_name.strip() or str(resolved.get("display_name") or target_id)
+    elif raw_id:
+        try:
+            target_id = int(raw_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Telegram ID должен быть числом")
+        if target_id <= 0:
+            raise HTTPException(status_code=400, detail="Telegram ID должен быть положительным числом")
+        target_username = None
+        target_name = display_name.strip() or None
+    else:
+        raise HTTPException(status_code=400, detail="Введите @username или Telegram ID")
+
+    add_system_admin(target_id, display_name=target_name, username=target_username)
+    audit(
+        f"web:{WEB_USERNAME}",
+        "admin_added",
+        str(target_id),
+        {"username": target_username or "", "resolved_by": (resolved or {}).get("source", "manual_id")},
     )
-    audit(f"web:{WEB_USERNAME}", "admin_added", str(user_id))
-    return redirect("/admins", "Администратор добавлен")
+    label = f"@{target_username}" if target_username else str(target_id)
+    return redirect("/admins", f"Администратор {label} добавлен")
 
 
 @app.post("/admins/{user_id}/remove")
@@ -430,7 +509,14 @@ async def admins_notifications(request: Request, user_id: int, csrf: str = Form(
 @app.get("/bot", response_class=HTMLResponse)
 async def bot_settings_page(request: Request, msg: str | None = None):
     require_session(request)
-    return render(request, "bot_settings.html", settings=load_settings(OWNER_ID), msg=msg)
+    return render(
+        request,
+        "bot_settings.html",
+        settings=load_settings(OWNER_ID),
+        chats=list_known_chats(include_untracked=False),
+        admins=list_system_admins(),
+        msg=msg,
+    )
 
 
 @app.post("/bot")
@@ -444,6 +530,7 @@ async def bot_settings_save(
     reply_delay: int = Form(...),
     welcome_text: str = Form(...),
     consent_text: str = Form(...),
+    nudge_text: str = Form(...),
 ):
     verify_csrf(request, csrf)
     current = load_settings(OWNER_ID)
@@ -457,12 +544,56 @@ async def bot_settings_save(
             "texts": {
                 "welcome_text": welcome_text,
                 "consent_text": consent_text,
+                "nudge_text": nudge_text,
             },
         }
     )
     save_settings(current, OWNER_ID)
     audit(f"web:{WEB_USERNAME}", "bot_settings")
     return redirect("/bot", "Настройки бота сохранены")
+
+
+@app.post("/bot/test-notification")
+async def bot_test_notification(
+    request: Request,
+    csrf: str = Form(...),
+    chat_id: int = Form(...),
+    recipient_id: int = Form(...),
+):
+    require_owner_session(request)
+    verify_csrf(request, csrf)
+    visible_chat_ids = {int(row["chat_id"]) for row in list_known_chats(include_untracked=False)}
+    if int(chat_id) not in visible_chat_ids:
+        raise HTTPException(status_code=400, detail="Выбранный чат не отслеживается")
+    admin_ids = {int(row["user_id"]) for row in list_system_admins()}
+    if int(recipient_id) not in admin_ids:
+        raise HTTPException(status_code=400, detail="Получатель не является администратором")
+    try:
+        from bot_app import send_test_alert
+        await send_test_alert(int(recipient_id), int(chat_id), f"web:{WEB_USERNAME}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Не удалось отправить тест: {str(exc)[:220]}")
+    return redirect("/bot", "Тестовое оповещение отправлено")
+
+
+@app.post("/members/nudge")
+async def member_nudge_from_web(
+    request: Request,
+    csrf: str = Form(...),
+    chat_id: int = Form(...),
+    user_id: int = Form(...),
+):
+    require_session(request)
+    verify_csrf(request, csrf)
+    member = get_chat_member_stats(int(chat_id), int(user_id))
+    if not member or not int(member.get("is_active") or 0) or int(member.get("is_bot") or 0):
+        raise HTTPException(status_code=400, detail="Пользователь больше не является активным участником группы")
+    try:
+        from bot_app import send_member_nudge
+        await send_member_nudge(int(chat_id), int(user_id), f"web:{WEB_USERNAME}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Не удалось отправить пинг: {str(exc)[:220]}")
+    return redirect(f"/members?chat_id={int(chat_id)}", "Пинг участнику отправлен в группу")
 
 
 def _qr_svg_data_uri(url: str | None) -> str | None:
@@ -512,7 +643,7 @@ def _telethon_page_response(request: Request, *, msg: str | None = None, error: 
 
 @app.get("/telethon", response_class=HTMLResponse)
 async def telethon_page(request: Request, msg: str | None = None):
-    require_session(request)
+    require_owner_session(request)
     return _telethon_page_response(request, msg=msg)
 
 
@@ -523,6 +654,7 @@ async def telethon_configure(
     api_id: str = Form(...),
     api_hash: str = Form(""),
 ):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     current = load_telethon_config()
     if telethon_status()["authorized"]:
@@ -541,6 +673,7 @@ async def telethon_configure(
 
 @app.post("/telethon/check", response_class=HTMLResponse)
 async def telethon_check_existing(request: Request, csrf: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     try:
         result = await telethon_auth.check_existing()
@@ -554,6 +687,7 @@ async def telethon_check_existing(request: Request, csrf: str = Form(...)):
 
 @app.post("/telethon/qr", response_class=HTMLResponse)
 async def telethon_qr_start(request: Request, csrf: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     try:
         result = await telethon_auth.start_qr()
@@ -568,7 +702,7 @@ async def telethon_qr_start(request: Request, csrf: str = Form(...)):
 
 @app.get("/telethon/qr/status")
 async def telethon_qr_status(request: Request):
-    require_session(request)
+    require_owner_session(request)
     status_info = telethon_status()
     auth_info = telethon_auth.public_state()
     step = "done" if status_info.get("authorized") else str(auth_info.get("step") or "idle")
@@ -582,6 +716,7 @@ async def telethon_qr_status(request: Request):
 
 @app.post("/telethon/resend", response_class=HTMLResponse)
 async def telethon_resend(request: Request, csrf: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     try:
         result = await telethon_auth.resend_code()
@@ -595,6 +730,7 @@ async def telethon_resend(request: Request, csrf: str = Form(...)):
 
 @app.post("/telethon/phone", response_class=HTMLResponse)
 async def telethon_phone(request: Request, csrf: str = Form(...), phone: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     try:
         result = await telethon_auth.send_code(phone)
@@ -611,6 +747,7 @@ async def telethon_phone(request: Request, csrf: str = Form(...), phone: str = F
 
 @app.post("/telethon/code", response_class=HTMLResponse)
 async def telethon_code(request: Request, csrf: str = Form(...), code: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     try:
         result = await telethon_auth.submit_code(code)
@@ -624,6 +761,7 @@ async def telethon_code(request: Request, csrf: str = Form(...), code: str = For
 
 @app.post("/telethon/password", response_class=HTMLResponse)
 async def telethon_password(request: Request, csrf: str = Form(...), password: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     try:
         await telethon_auth.submit_password(password)
@@ -635,6 +773,7 @@ async def telethon_password(request: Request, csrf: str = Form(...), password: s
 
 @app.post("/telethon/enabled")
 async def telethon_enabled(request: Request, csrf: str = Form(...), enabled: int = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     status_info = telethon_status()
     if bool(enabled) and not status_info["authorized"]:
@@ -647,6 +786,7 @@ async def telethon_enabled(request: Request, csrf: str = Form(...), enabled: int
 
 @app.post("/telethon/cancel")
 async def telethon_cancel(request: Request, csrf: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     await telethon_auth.reset(clear_pending=True)
     audit(f"web:{WEB_USERNAME}", "telethon_setup_cancelled")

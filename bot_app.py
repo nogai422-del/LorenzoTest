@@ -30,12 +30,14 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 from db import (
+    audit,
     bootstrap_admins,
     init_db,
     dashboard_stats,
     ensure_chat_settings,
     get_alert_candidates,
     get_chat_info,
+    get_chat_member_stats,
     get_chat_settings,
     is_system_admin,
     list_admin_ids,
@@ -50,7 +52,7 @@ from db import (
     upsert_message_activity,
     update_admin_identity,
 )
-from inactivity import inactivity_watcher
+from inactivity import inactivity_watcher, send_test_inactivity_alert
 from settings_store import load_settings, save_settings
 from telethon_config import telethon_status
 from runtime_paths import LOG_PATH, PROJECT_DIR, SETTINGS_PATH, web_public_url
@@ -140,6 +142,9 @@ class TrackActivityMiddleware(BaseMiddleware):
                     tracked=True,
                     discovered_by="bot",
                 )
+                chat_info = get_chat_info(chat_id) or {}
+                if int(chat_info.get("is_hidden") or 0):
+                    return await handler(event, data)
                 ensure_chat_settings(chat_id)
                 is_service = bool(event.new_chat_members or event.left_chat_member)
                 if event.from_user and not event.from_user.is_bot and not is_service:
@@ -245,6 +250,56 @@ async def notify_admins(text: str) -> None:
             await botlog(f"notify admin={admin_id} failed: {exc}")
 
 
+def build_nudge_text(member: dict) -> str:
+    settings = current_settings()
+    template = str((settings.get("texts") or {}).get("nudge_text") or "{mention}, что молчишь? 🙂")
+    user_id = int(member["user_id"])
+    name = str(member.get("user_name") or user_id)
+    username = str(member.get("username") or "")
+    safe_template = html.escape(template)
+    replacements = {
+        "{mention}": f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>',
+        "{name}": html.escape(name),
+        "{username}": html.escape("@" + username if username else ""),
+        "{user_id}": str(user_id),
+    }
+    for key, value in replacements.items():
+        safe_template = safe_template.replace(key, value)
+    return safe_template
+
+
+async def send_member_nudge(chat_id: int, user_id: int, actor: str) -> Message:
+    info = get_chat_info(int(chat_id)) or {}
+    if (
+        info.get("chat_type") not in {"group", "supergroup"}
+        or not int(info.get("is_tracked") or 0)
+        or int(info.get("is_hidden") or 0)
+    ):
+        raise ValueError("Чат не отслеживается или скрыт")
+    member = get_chat_member_stats(int(chat_id), int(user_id))
+    if not member or not int(member.get("is_active") or 0) or int(member.get("is_bot") or 0):
+        raise ValueError("Участник больше не состоит в выбранной группе")
+    text = build_nudge_text(member)
+    sent = await bot.send_message(
+        int(chat_id),
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    audit(
+        actor,
+        "member_nudge_sent",
+        f"{int(chat_id)}:{int(user_id)}",
+        {"message_id": int(sent.message_id), "template": str((current_settings().get("texts") or {}).get("nudge_text") or "")[:500]},
+    )
+    return sent
+
+
+async def send_test_alert(recipient_id: int, chat_id: int, actor: str) -> None:
+    await send_test_inactivity_alert(bot, int(recipient_id), int(chat_id))
+    audit(actor, "test_notification_sent", f"{int(chat_id)}:{int(recipient_id)}")
+
+
 async def do_ban(message: Message, reason: str) -> None:
     await botlog(f"BAN user_id={message.from_user.id} reason={reason}")
     try:
@@ -298,6 +353,9 @@ async def welcome_new_member(message: Message) -> None:
         tracked=True,
         discovered_by="bot",
     )
+    chat_info = get_chat_info(chat_id) or {}
+    if int(chat_info.get("is_hidden") or 0):
+        return
     ensure_chat_settings(chat_id)
 
     settings = current_settings()
@@ -326,6 +384,9 @@ async def chat_member_updated_handler(event: ChatMemberUpdated) -> None:
     try:
         status_value = str(event.new_chat_member.status)
         chat_id = int(event.chat.id)
+        chat_info = get_chat_info(chat_id) or {}
+        if int(chat_info.get("is_hidden") or 0):
+            return
         user = event.new_chat_member.user
         if status_value in {"left", "kicked", "banned"}:
             set_left(chat_id, int(user.id), int(time.time()))
@@ -338,6 +399,9 @@ async def chat_member_updated_handler(event: ChatMemberUpdated) -> None:
 @router.message(F.left_chat_member)
 async def left_chat_member_handler(message: Message) -> None:
     if message.chat.type not in {"group", "supergroup"}:
+        return
+    chat_info = get_chat_info(int(message.chat.id)) or {}
+    if int(chat_info.get("is_hidden") or 0):
         return
     set_left(int(message.chat.id), int(message.left_chat_member.id), int(time.time()))
     try:
@@ -395,19 +459,23 @@ async def process_consent(message: Message, state: FSMContext) -> None:
 
 # ------------------------- Admin UI -------------------------
 
-def admin_main_kb() -> InlineKeyboardMarkup:
+def admin_main_kb(user_id: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats"), InlineKeyboardButton(text="👥 Участники", callback_data="adm:members")],
-        [InlineKeyboardButton(text="⚠️ Неактивные", callback_data="adm:inactive"), InlineKeyboardButton(text="🔄 Синхронизация", callback_data="adm:sync")],
-        [InlineKeyboardButton(text="🔔 Оповещения", callback_data="adm:notifs"), InlineKeyboardButton(text="⚙️ Бот", callback_data="adm:bot")],
+        [InlineKeyboardButton(text="⚠️ Неактивные", callback_data="adm:inactive"), InlineKeyboardButton(text="🤐 Не писали", callback_data="adm:silent")],
+        [InlineKeyboardButton(text="🔄 Синхронизация", callback_data="adm:sync"), InlineKeyboardButton(text="🔔 Оповещения", callback_data="adm:notifs")],
+        [InlineKeyboardButton(text="⚙️ Бот", callback_data="adm:bot")],
     ]
     if WEB_PUBLIC_URL:
         base_url = WEB_PUBLIC_URL.rstrip("/")
-        rows.append([
-            InlineKeyboardButton(text="🔐 Telethon", url=base_url + "/telethon"),
-            InlineKeyboardButton(text="🌐 Web-панель", url=base_url),
-        ])
-    else:
+        if int(user_id) == int(OWNER_ID):
+            rows.append([
+                InlineKeyboardButton(text="🔐 Telethon", url=base_url + "/telethon"),
+                InlineKeyboardButton(text="🌐 Web-панель", url=base_url),
+            ])
+        else:
+            rows.append([InlineKeyboardButton(text="🌐 Web-панель", url=base_url)])
+    elif int(user_id) == int(OWNER_ID):
         rows.append([InlineKeyboardButton(text="🔐 Telethon", callback_data="adm:telethon")])
     rows.append([InlineKeyboardButton(text="✖️ Закрыть", callback_data="adm:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -428,21 +496,26 @@ def chat_picker(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def admin_home_text() -> str:
+async def admin_home_text(user_id: int) -> str:
     stats = dashboard_stats()
     settings = current_settings()
-    tstatus = telethon_status()
-    telethon_icon = "✅" if tstatus["authorized"] else "⚠️"
-    return (
-        "🛠️ <b>Админ-панель</b>\n\n"
-        f"Отслеживаемых чатов: <b>{stats['tracked_chats']}</b>\n"
-        f"Участников в группах: <b>{stats['members']}</b>\n"
-        f"Активны за 24 часа: <b>{stats['active_24h']}</b>\n"
-        f"Активны за 7 дней: <b>{stats['active_7d']}</b>\n"
-        f"Онбординг: <b>{'включён' if settings['is_active'] else 'выключен'}</b>\n"
-        f"Telethon: {telethon_icon} <b>{html.escape(tstatus['status_label'])}</b>\n\n"
-        "Полное управление и графики доступны в web-панели."
-    )
+    lines = [
+        "🛠️ <b>Админ-панель</b>",
+        "",
+        f"Отслеживаемых чатов: <b>{stats['tracked_chats']}</b>",
+        f"Участников в группах: <b>{stats['members']}</b>",
+        f"Активны за 24 часа: <b>{stats['active_24h']}</b>",
+        f"Активны за 7 дней: <b>{stats['active_7d']}</b>",
+        f"Ни разу не писали: <b>{stats['never_wrote']}</b>",
+        f"Онбординг: <b>{'включён' if settings['is_active'] else 'выключен'}</b>",
+    ]
+    # Telethon details are infrastructure-level data and are visible only to owner.
+    if int(user_id) == int(OWNER_ID):
+        tstatus = telethon_status()
+        telethon_icon = "✅" if tstatus["authorized"] else "⚠️"
+        lines.append(f"Telethon: {telethon_icon} <b>{html.escape(tstatus['status_label'])}</b>")
+    lines.extend(["", "Полное управление и графики доступны в web-панели."])
+    return "\n".join(lines)
 
 
 async def require_admin_call(call: CallbackQuery) -> bool:
@@ -458,7 +531,7 @@ async def require_admin_call(call: CallbackQuery) -> bool:
 async def start_command(message: Message) -> None:
     if is_admin(message.from_user.id):
         update_admin_identity(message.from_user.id, message.from_user.full_name, message.from_user.username)
-        await message.reply(await admin_home_text(), reply_markup=admin_main_kb())
+        await message.reply(await admin_home_text(message.from_user.id), reply_markup=admin_main_kb(message.from_user.id))
         return
     await message.reply(
         "Бот работает. Административные функции доступны только назначенным администраторам.",
@@ -478,7 +551,7 @@ async def admin_open(message: Message) -> None:
         # Deliberately silent: regular users should not see an admin-panel response.
         return
     update_admin_identity(message.from_user.id, message.from_user.full_name, message.from_user.username)
-    await message.reply(await admin_home_text(), reply_markup=admin_main_kb())
+    await message.reply(await admin_home_text(message.from_user.id), reply_markup=admin_main_kb(message.from_user.id))
 
 
 @router.message(Command("members"))
@@ -492,7 +565,7 @@ async def members_command(message: Message) -> None:
 async def admin_home(call: CallbackQuery) -> None:
     if not await require_admin_call(call):
         return
-    await call.message.edit_text(await admin_home_text(), reply_markup=admin_main_kb())
+    await call.message.edit_text(await admin_home_text(call.from_user.id), reply_markup=admin_main_kb(call.from_user.id))
     await call.answer()
 
 
@@ -507,6 +580,9 @@ async def admin_close(call: CallbackQuery) -> None:
 @router.callback_query(F.data == "adm:telethon")
 async def admin_telethon_status(call: CallbackQuery) -> None:
     if not await require_admin_call(call):
+        return
+    if int(call.from_user.id) != int(OWNER_ID):
+        await call.answer("Telethon доступен только владельцу", show_alert=True)
         return
     status_info = telethon_status()
     account = status_info.get("account") or {}
@@ -539,7 +615,8 @@ async def admin_stats(call: CallbackQuery) -> None:
         f"Участников: <b>{stats['members']}</b>\n"
         f"Активны 24ч: <b>{stats['active_24h']}</b>\n"
         f"Активны 7д: <b>{stats['active_7d']}</b>\n"
-        f"Неактивны 7д+: <b>{stats['inactive_7d']}</b>"
+        f"Неактивны 7д+: <b>{stats['inactive_7d']}</b>\n"
+        f"Ни разу не писали: <b>{stats['never_wrote']}</b>"
     )
     await call.message.edit_text(text, reply_markup=back_kb())
     await call.answer()
@@ -557,24 +634,103 @@ async def admin_members_picker(call: CallbackQuery) -> None:
 async def admin_members_chat(call: CallbackQuery) -> None:
     if not await require_admin_call(call):
         return
-    chat_id = int(call.data.rsplit(":", 1)[1])
+    raw = call.data[len("adm:members:chat:"):]
+    parts = raw.split(":", 1)
+    chat_id = int(parts[0])
+    page = max(0, int(parts[1])) if len(parts) > 1 else 0
+    page_size = 8
     info = get_chat_info(chat_id) or {}
-    rows = list_members_for_web(chat_id, active="active", limit=12)
+    probe = list_members_for_web(chat_id, active="active", limit=page_size + 1, offset=page * page_size)
+    has_next = len(probe) > page_size
+    rows = probe[:page_size]
     lines = []
-    for idx, row in enumerate(rows, 1):
+    for idx, row in enumerate(rows, page * page_size + 1):
         name = html.escape(row["user_name"] or str(row["user_id"]))
         lines.append(
             f"{idx}. <a href=\"tg://user?id={int(row['user_id'])}\">{name}</a> — "
             f"7д: <b>{int(row['messages_7d'])}</b>, 30д: <b>{int(row['messages_30d'])}</b>"
         )
     title = html.escape(info.get("title") or str(chat_id))
-    text = f"👥 <b>{title}</b>\n\n" + ("\n".join(lines) if lines else "Пока нет данных.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    text = f"👥 <b>{title}</b> · стр. {page + 1}\n\n" + ("\n".join(lines) if lines else "Пока нет данных.")
+    keyboard_rows = []
+    for row in rows:
+        button_name = str(row["user_name"] or row["username"] or row["user_id"])
+        if len(button_name) > 24:
+            button_name = button_name[:21] + "..."
+        keyboard_rows.append([InlineKeyboardButton(text=f"💬 Пинг: {button_name}", callback_data=f"adm:nudge:{chat_id}:{int(row['user_id'])}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm:members:chat:{chat_id}:{page-1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm:members:chat:{chat_id}:{page+1}"))
+    if nav:
+        keyboard_rows.append(nav)
+    keyboard_rows.extend([
         [InlineKeyboardButton(text="🔄 Синхронизировать", callback_data=f"adm:sync:chat:{chat_id}")],
         [InlineKeyboardButton(text="◀️ К группам", callback_data="adm:members")],
     ])
-    await call.message.edit_text(text, reply_markup=kb)
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
     await call.answer()
+
+
+@router.callback_query(F.data == "adm:silent")
+async def admin_silent_picker(call: CallbackQuery) -> None:
+    if not await require_admin_call(call):
+        return
+    await call.message.edit_text("🤐 <b>Ни разу не писали — выберите группу</b>", reply_markup=chat_picker("adm:silent:chat"))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:silent:chat:"))
+async def admin_silent_chat(call: CallbackQuery) -> None:
+    if not await require_admin_call(call):
+        return
+    raw = call.data[len("adm:silent:chat:"):]
+    parts = raw.split(":", 1)
+    chat_id = int(parts[0])
+    page = max(0, int(parts[1])) if len(parts) > 1 else 0
+    page_size = 8
+    info = get_chat_info(chat_id) or {}
+    probe = list_members_for_web(chat_id, active="silent", limit=page_size + 1, offset=page * page_size)
+    has_next = len(probe) > page_size
+    rows = probe[:page_size]
+    lines = []
+    buttons = []
+    for idx, row in enumerate(rows, page * page_size + 1):
+        user_id = int(row["user_id"])
+        name_raw = str(row["user_name"] or row["username"] or user_id)
+        name = html.escape(name_raw)
+        joined = int(row["joined_at"] or row["first_seen_at"] or 0)
+        days = max(0, (int(time.time()) - joined) // 86400) if joined else 0
+        lines.append(f"{idx}. <a href=\"tg://user?id={user_id}\">{name}</a> — в группе ~<b>{days} дн.</b>, сообщений: <b>0</b>")
+        button_name = name_raw if len(name_raw) <= 24 else name_raw[:21] + "..."
+        buttons.append([InlineKeyboardButton(text=f"💬 Пинг: {button_name}", callback_data=f"adm:nudge:{chat_id}:{user_id}")])
+    title = html.escape(info.get("title") or str(chat_id))
+    text = f"🤐 <b>{title}</b> · стр. {page + 1}" + ("\n\n" + "\n".join(lines) if lines else "\n\nТаких участников нет.")
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm:silent:chat:{chat_id}:{page-1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm:silent:chat:{chat_id}:{page+1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="◀️ К группам", callback_data="adm:silent")])
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:nudge:"))
+async def admin_nudge_member(call: CallbackQuery) -> None:
+    if not await require_admin_call(call):
+        return
+    try:
+        _, _, chat_raw, user_raw = call.data.split(":", 3)
+        chat_id, user_id = int(chat_raw), int(user_raw)
+        await send_member_nudge(chat_id, user_id, f"telegram:{call.from_user.id}")
+    except Exception as exc:
+        await call.answer(f"Не удалось отправить: {str(exc)[:120]}", show_alert=True)
+        return
+    await call.answer("Сообщение отправлено участнику в группу", show_alert=True)
 
 
 @router.callback_query(F.data == "adm:inactive")
@@ -639,9 +795,31 @@ async def admin_notifications(call: CallbackQuery) -> None:
                     callback_data=f"adm:notif:toggle:{int(admin['user_id'])}:{0 if enabled else 1}",
                 )
             ])
+    rows.append([InlineKeyboardButton(text="🧪 Тест оповещения мне", callback_data="adm:notif:test")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:home")])
     await call.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await call.answer()
+
+
+@router.callback_query(F.data == "adm:notif:test")
+async def admin_notification_test_picker(call: CallbackQuery) -> None:
+    if not await require_admin_call(call):
+        return
+    await call.message.edit_text("🧪 <b>Тест оповещения — выберите группу</b>", reply_markup=chat_picker("adm:notif:test:chat"))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:notif:test:chat:"))
+async def admin_notification_test(call: CallbackQuery) -> None:
+    if not await require_admin_call(call):
+        return
+    chat_id = int(call.data.rsplit(":", 1)[1])
+    try:
+        await send_test_alert(call.from_user.id, chat_id, f"telegram:{call.from_user.id}")
+    except Exception as exc:
+        await call.answer(f"Тест не отправлен: {str(exc)[:120]}", show_alert=True)
+        return
+    await call.answer("Тестовое оповещение отправлено вам в этот чат", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("adm:notif:toggle:"))

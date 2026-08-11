@@ -261,6 +261,9 @@ class TelethonSyncService:
     ) -> dict:
         lock = self._sync_locks.setdefault(int(chat_id), asyncio.Lock())
         async with lock:
+            current = get_chat_info(chat_id) or {}
+            if int(current.get("is_hidden") or 0):
+                raise ValueError("Chat is hidden by owner")
             entity = await self.client.get_entity(int(chat_id))
             identity = chat_identity(entity)
             if not identity:
@@ -283,8 +286,12 @@ class TelethonSyncService:
         sync_token = uuid.uuid4().hex
         checked_at = int(time.time())
         participants = 0
+        human_participants = 0
         async for user in self.client.iter_participants(entity):
             participants += 1
+            is_bot = bool(getattr(user, "bot", False))
+            if not is_bot:
+                human_participants += 1
             status, last_seen = status_snapshot(user, checked_at)
             upsert_member_snapshot(
                 chat_id=chat_id,
@@ -295,18 +302,20 @@ class TelethonSyncService:
                 telegram_last_seen_at=last_seen,
                 telegram_status=status,
                 telegram_status_checked_at=checked_at,
-                is_bot=bool(getattr(user, "bot", False)),
+                is_bot=is_bot,
                 membership_status=participant_status(user),
                 sync_token=sync_token,
             )
         left = mark_missing_members_left(chat_id, sync_token, checked_at)
         update_chat_sync_status(
             chat_id,
-            participant_count=participants,
+            # Keep the chat-card count aligned with dashboard members, which
+            # intentionally excludes bot accounts.
+            participant_count=human_participants,
             member_synced_at=checked_at,
             error="",
         )
-        return {"members": participants, "left": left}
+        return {"members": human_participants, "participants_total": participants, "left": left}
 
     async def _sync_history(self, chat_id: int, entity, *, force_backfill: bool = False) -> int:
         info = get_chat_info(chat_id) or {}
@@ -345,6 +354,9 @@ class TelethonSyncService:
                 now_ts=msg_ts or now_ts,
                 message_id=int(message.id),
                 is_bot=False,
+                # A historical message proves past activity, not current
+                # membership. Current membership is owned by _sync_members().
+                mark_active=False,
             ):
                 new_messages += 1
 

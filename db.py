@@ -58,6 +58,7 @@ def init_db() -> None:
                 chat_type TEXT,
                 last_seen_at INTEGER NOT NULL DEFAULT 0,
                 is_tracked INTEGER NOT NULL DEFAULT 0,
+                is_hidden INTEGER NOT NULL DEFAULT 0,
                 discovered_by TEXT,
                 participant_count INTEGER NOT NULL DEFAULT 0,
                 last_member_sync_at INTEGER NOT NULL DEFAULT 0,
@@ -180,6 +181,7 @@ def init_db() -> None:
 
         # Migrations from the original project.
         _add_column(conn, "chats", "is_tracked", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "chats", "is_hidden", "INTEGER NOT NULL DEFAULT 0")
         _add_column(conn, "chats", "discovered_by", "TEXT")
         _add_column(conn, "chats", "participant_count", "INTEGER NOT NULL DEFAULT 0")
         _add_column(conn, "chats", "last_member_sync_at", "INTEGER NOT NULL DEFAULT 0")
@@ -354,8 +356,11 @@ def record_chat(
         return False
     now_ts = int(now_ts or time.time())
     with get_conn() as conn:
-        previous = conn.execute("SELECT is_tracked FROM chats WHERE chat_id=?", (int(chat_id),)).fetchone()
-        if tracked is None:
+        previous = conn.execute("SELECT is_tracked, is_hidden FROM chats WHERE chat_id=?", (int(chat_id),)).fetchone()
+        is_hidden = bool(previous and int(previous["is_hidden"] or 0))
+        if is_hidden:
+            tracked_value = 0
+        elif tracked is None:
             tracked_value = int(previous["is_tracked"]) if previous else 0
         else:
             tracked_value = 1 if tracked else 0
@@ -368,7 +373,11 @@ def record_chat(
                 username=COALESCE(excluded.username, chats.username),
                 chat_type=excluded.chat_type,
                 last_seen_at=MAX(chats.last_seen_at, excluded.last_seen_at),
-                is_tracked=CASE WHEN ? IS NULL THEN chats.is_tracked ELSE excluded.is_tracked END,
+                is_tracked=CASE
+                    WHEN COALESCE(chats.is_hidden,0)=1 THEN 0
+                    WHEN ? IS NULL THEN chats.is_tracked
+                    ELSE excluded.is_tracked
+                END,
                 discovered_by=COALESCE(excluded.discovered_by, chats.discovered_by)
             """,
             (int(chat_id), title, username, chat_type, now_ts, tracked_value, discovered_by, tracked),
@@ -379,8 +388,11 @@ def record_chat(
 
 def set_chat_tracked(chat_id: int, tracked: bool) -> bool:
     with get_conn() as conn:
-        row = conn.execute("SELECT chat_type FROM chats WHERE chat_id=?", (int(chat_id),)).fetchone()
+        row = conn.execute("SELECT chat_type, is_hidden FROM chats WHERE chat_id=?", (int(chat_id),)).fetchone()
         if not row or int(chat_id) >= 0 or not is_valid_group_type(row["chat_type"]):
+            return False
+        # Hidden chats are owner-archived and cannot silently re-enter monitoring.
+        if tracked and int(row["is_hidden"] or 0):
             return False
         conn.execute("UPDATE chats SET is_tracked=? WHERE chat_id=?", (1 if tracked else 0, int(chat_id)))
         if tracked:
@@ -389,8 +401,31 @@ def set_chat_tracked(chat_id: int, tracked: bool) -> bool:
     return True
 
 
-def list_known_chats(*, include_untracked: bool = True) -> list[sqlite3.Row]:
+def set_chat_hidden(chat_id: int, hidden: bool) -> bool:
+    """Owner-only archive flag. Hidden chats are removed from monitoring and alerts."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT chat_type FROM chats WHERE chat_id=?", (int(chat_id),)).fetchone()
+        if not row or int(chat_id) >= 0 or not is_valid_group_type(row["chat_type"]):
+            return False
+        conn.execute(
+            "UPDATE chats SET is_hidden=?, is_tracked=CASE WHEN ? THEN 0 ELSE is_tracked END WHERE chat_id=?",
+            (1 if hidden else 0, 1 if hidden else 0, int(chat_id)),
+        )
+        if hidden:
+            conn.execute("UPDATE chat_settings SET enabled=0 WHERE chat_id=?", (int(chat_id),))
+            conn.execute(
+                "UPDATE sync_requests SET status='cancelled', completed_at=?, error='Chat hidden by owner' "
+                "WHERE chat_id=? AND status IN ('pending','running')",
+                (int(time.time()), int(chat_id)),
+            )
+        conn.commit()
+    return True
+
+
+def list_known_chats(*, include_untracked: bool = True, include_hidden: bool = False) -> list[sqlite3.Row]:
     where = "c.chat_type IN ('group','supergroup')"
+    if not include_hidden:
+        where += " AND COALESCE(c.is_hidden,0)=0"
     if not include_untracked:
         where += " AND c.is_tracked=1"
     with get_conn() as conn:
@@ -400,7 +435,20 @@ def list_known_chats(*, include_untracked: bool = True) -> list[sqlite3.Row]:
             FROM chats c
             LEFT JOIN chat_settings s ON s.chat_id=c.chat_id
             WHERE {where}
-            ORDER BY c.is_tracked DESC, c.last_seen_at DESC, c.title COLLATE NOCASE
+            ORDER BY c.is_hidden ASC, c.is_tracked DESC, c.last_seen_at DESC, c.title COLLATE NOCASE
+            """
+        ).fetchall()
+
+
+def list_hidden_chats() -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT c.*, COALESCE(s.enabled, 0) AS alerts_enabled
+            FROM chats c
+            LEFT JOIN chat_settings s ON s.chat_id=c.chat_id
+            WHERE c.chat_type IN ('group','supergroup') AND COALESCE(c.is_hidden,0)=1
+            ORDER BY c.last_seen_at DESC, c.title COLLATE NOCASE
             """
         ).fetchall()
 
@@ -408,7 +456,7 @@ def list_known_chats(*, include_untracked: bool = True) -> list[sqlite3.Row]:
 def list_tracked_chat_ids() -> list[int]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT chat_id FROM chats WHERE is_tracked=1 AND chat_type IN ('group','supergroup') ORDER BY chat_id"
+            "SELECT chat_id FROM chats WHERE is_tracked=1 AND COALESCE(is_hidden,0)=0 AND chat_type IN ('group','supergroup') ORDER BY chat_id"
         ).fetchall()
     return [int(r["chat_id"]) for r in rows]
 
@@ -519,8 +567,13 @@ def upsert_message_activity(
     username: str | None = None,
     *,
     is_bot: bool = False,
+    mark_active: bool = True,
 ) -> bool:
-    """Record one message exactly once. Returns True when it was a new message."""
+    """Record one message exactly once.
+
+    ``mark_active=False`` is used for historical backfills: old messages update
+    activity counters but must never resurrect a user who has already left.
+    """
     now_ts = int(now_ts)
     message_id = int(message_id) if message_id is not None else None
     with get_conn() as conn:
@@ -538,7 +591,7 @@ def upsert_message_activity(
                 chat_id, user_id, user_name, username, joined_at, left_at,
                 first_seen_at, updated_at, last_message_at, last_message_id,
                 total_message_count, is_active, is_bot, membership_status
-            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 1, 1, ?, 'member')
+            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(chat_id, user_id) DO UPDATE SET
                 user_name=CASE
                     WHEN chat_members.user_name IS NULL OR chat_members.user_name=CAST(chat_members.user_id AS TEXT)
@@ -552,17 +605,24 @@ def upsert_message_activity(
                 last_message_id=CASE WHEN excluded.last_message_at >= COALESCE(chat_members.last_message_at, 0)
                                      THEN excluded.last_message_id ELSE chat_members.last_message_id END,
                 total_message_count=chat_members.total_message_count+1,
-                is_active=1,
+                is_active=CASE WHEN ?=1 THEN 1 ELSE chat_members.is_active END,
                 is_bot=excluded.is_bot,
                 membership_status=CASE
+                    WHEN ?=0 THEN chat_members.membership_status
                     WHEN chat_members.membership_status IN ('admin','creator') THEN chat_members.membership_status
                     ELSE 'member'
                 END,
-                left_at=NULL
+                left_at=CASE WHEN ?=1 THEN NULL ELSE chat_members.left_at END
             """,
             (
                 int(chat_id), int(user_id), user_name, username, first_seen,
-                now_ts, now_ts, message_id, 1 if is_bot else 0,
+                now_ts, now_ts, message_id,
+                1 if mark_active else 0,
+                1 if is_bot else 0,
+                "member" if mark_active else "left",
+                1 if mark_active else 0,
+                1 if mark_active else 0,
+                1 if mark_active else 0,
             ),
         )
         day = _day_from_ts(now_ts)
@@ -799,7 +859,7 @@ def list_chat_ids_with_settings() -> list[int]:
             SELECT s.chat_id
             FROM chat_settings s
             JOIN chats c ON c.chat_id=s.chat_id
-            WHERE c.is_tracked=1 AND c.chat_type IN ('group','supergroup')
+            WHERE c.is_tracked=1 AND COALESCE(c.is_hidden,0)=0 AND c.chat_type IN ('group','supergroup')
             ORDER BY s.chat_id
             """
         ).fetchall()
@@ -809,6 +869,30 @@ def list_chat_ids_with_settings() -> list[int]:
 def get_chat_member_stats(chat_id: int, user_id: int) -> Optional[dict]:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM chat_members WHERE chat_id=? AND user_id=?", (int(chat_id), int(user_id))).fetchone()
+    return dict(row) if row else None
+
+
+def find_known_user_by_username(username: str) -> Optional[dict]:
+    """Resolve a username from already-synchronised member data.
+
+    Usernames can change, so this is a fast local fallback. Web admin creation
+    prefers a live Telethon lookup when an authorised session is available.
+    """
+    normalized = str(username or "").strip().lstrip("@").lower()
+    if not normalized:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT user_id, user_name, username, MAX(updated_at) AS last_updated
+            FROM chat_members
+            WHERE is_bot=0 AND LOWER(COALESCE(username,''))=?
+            GROUP BY user_id, user_name, username
+            ORDER BY last_updated DESC
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -968,6 +1052,10 @@ def list_members_for_web(
         args.append(int(chat_id))
     if active == "active":
         clauses.append("m.is_active=1")
+    elif active == "silent":
+        clauses.append("m.is_active=1")
+        clauses.append("m.last_message_at IS NULL")
+        clauses.append("COALESCE(m.total_message_count,0)=0")
     elif active == "left":
         clauses.append("m.is_active=0")
     if search.strip():
@@ -1041,22 +1129,24 @@ def dashboard_stats(chat_id: int | None = None) -> dict:
               SUM(CASE WHEN m.is_active=1 AND m.last_message_at>=? THEN 1 ELSE 0 END) AS active_24h,
               SUM(CASE WHEN m.is_active=1 AND m.last_message_at>=? THEN 1 ELSE 0 END) AS active_7d,
               SUM(CASE WHEN m.is_active=1 AND COALESCE(m.last_message_at, m.joined_at, m.first_seen_at, 0)<? THEN 1 ELSE 0 END) AS inactive_7d,
-              SUM(CASE WHEN COALESCE(m.joined_at, m.first_seen_at, 0)>=? THEN 1 ELSE 0 END) AS joined_7d,
+              SUM(CASE WHEN m.is_active=1 AND m.last_message_at IS NULL AND COALESCE(m.total_message_count,0)=0 THEN 1 ELSE 0 END) AS never_wrote,
+              SUM(CASE WHEN m.joined_at IS NOT NULL AND m.joined_at>=? THEN 1 ELSE 0 END) AS joined_7d,
               SUM(CASE WHEN m.left_at>=? THEN 1 ELSE 0 END) AS left_7d
             FROM chat_members m
-            JOIN chats c ON c.chat_id=m.chat_id AND c.is_tracked=1 AND c.chat_type IN ('group','supergroup')
+            JOIN chats c ON c.chat_id=m.chat_id AND c.is_tracked=1 AND COALESCE(c.is_hidden,0)=0 AND c.chat_type IN ('group','supergroup')
             WHERE {where}
             """,
             [last_24h, last_7d, last_7d, last_7d, last_7d, *args],
         ).fetchone()
         tracked = conn.execute(
-            "SELECT COUNT(*) AS n FROM chats WHERE is_tracked=1 AND chat_type IN ('group','supergroup')"
+            "SELECT COUNT(*) AS n FROM chats WHERE is_tracked=1 AND COALESCE(is_hidden,0)=0 AND chat_type IN ('group','supergroup')"
         ).fetchone()["n"]
     return {
         "members": int(row["members"] or 0),
         "active_24h": int(row["active_24h"] or 0),
         "active_7d": int(row["active_7d"] or 0),
         "inactive_7d": int(row["inactive_7d"] or 0),
+        "never_wrote": int(row["never_wrote"] or 0),
         "joined_7d": int(row["joined_7d"] or 0),
         "left_7d": int(row["left_7d"] or 0),
         "tracked_chats": int(tracked or 0),
@@ -1077,7 +1167,7 @@ def activity_series(chat_id: int | None = None, days: int = 30) -> list[dict]:
             f"""
             SELECT a.day, SUM(a.message_count) AS messages, COUNT(DISTINCT a.user_id) AS active_users
             FROM member_daily_activity a
-            JOIN chats c ON c.chat_id=a.chat_id AND c.is_tracked=1 AND c.chat_type IN ('group','supergroup')
+            JOIN chats c ON c.chat_id=a.chat_id AND c.is_tracked=1 AND COALESCE(c.is_hidden,0)=0 AND c.chat_type IN ('group','supergroup')
             WHERE {where.replace('day', 'a.day').replace('chat_id', 'a.chat_id')}
             GROUP BY a.day ORDER BY a.day
             """,

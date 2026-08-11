@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Скрытые чаты — Lorenzo Admin{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <span class="eyebrow">Owner only</span>
+    <h1>Скрытые чаты</h1>
+    <div class="subtle">Эти группы не отображаются обычным администраторам, не входят в Dashboard, не синхронизируются и не получают алерты. Раздел доступен только владельцу.</div>
+  </div>
+  <a class="btn" href="/chats">Вернуться к чатам</a>
+</div>
+{% if msg %}<div class="message">{{ msg }}</div>{% endif %}
+<section class="panel">
+  <div class="panel-head"><div><h2>Архив чатов</h2><div class="subtle">Возвращённый чат появится среди доступных, но мониторинг нужно будет включить вручную.</div></div></div>
+  {% if not chats %}<div class="empty">Скрытых чатов пока нет.</div>{% endif %}
+  <div class="chat-list">
+  {% for chat in chats %}
+    <article class="chat-card">
+      <div class="chat-card-main">
+        <div class="chat-card-head">
+          <div>
+            <div class="chat-title">{{ chat.title or chat.username or chat.chat_id }}</div>
+            <div class="muted small">ID {{ chat.chat_id }} · {{ chat.chat_type }} · участников при последней синхронизации: {{ chat.participant_count or 0 }}</div>
+          </div>
+          <div class="chat-badges"><span class="badge">Скрыт</span></div>
+        </div>
+        <div class="detail-list compact spaced">
+          <div><span>Последняя синхронизация</span><strong>{{ chat.last_member_sync_at|dt }}</strong></div>
+          <div><span>Отслеживание</span><strong>выключено</strong></div>
+          <div><span>Оповещения</span><strong>выключены</strong></div>
+        </div>
+      </div>
+      <div class="chat-card-side">
+        <form action="/chats/{{ chat.chat_id }}/restore" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="btn primary block" type="submit">Вернуть чат</button>
+        </form>
+      </div>
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% endblock %}

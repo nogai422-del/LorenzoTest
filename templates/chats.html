@@ -7,6 +7,7 @@
     <h1>Чаты</h1>
     <div class="subtle">Управление отслеживаемыми группами, правилами неактивности и ручной синхронизацией. Личные аккаунты и broadcast-каналы исключены.</div>
   </div>
+  {% if is_owner %}<a class="btn" href="/chats/hidden">Скрытые чаты</a>{% endif %}
 </div>
 {% if msg %}<div class="message">{{ msg }}</div>{% endif %}
 
@@ -65,6 +66,12 @@
         <form action="/chats/{{ chat.chat_id }}/sync" method="post">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button class="btn block" type="submit">🔄 Синхронизировать сейчас</button>
+        </form>
+        {% endif %}
+        {% if is_owner %}
+        <form action="/chats/{{ chat.chat_id }}/hide" method="post" onsubmit="return confirm('Скрыть этот чат? Отслеживание и алерты будут отключены.');">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="btn ghost block" type="submit">Скрыть из панели</button>
         </form>
         {% endif %}
       </div>

@@ -39,6 +39,7 @@
   <div class="card metric-card"><div class="label">Неактивны 7д+</div><div class="value">{{ stats.inactive_7d }}</div><div class="metric-foot">Нуждаются во внимании</div></div>
   <div class="card metric-card"><div class="label">Новые 7д</div><div class="value">{{ stats.joined_7d }}</div><div class="metric-foot">Новые участники</div></div>
   <div class="card metric-card"><div class="label">Вышли 7д</div><div class="value">{{ stats.left_7d }}</div><div class="metric-foot">Отток</div></div>
+  <a class="card metric-card" href="/members?{% if selected_chat_id %}chat_id={{ selected_chat_id }}&{% endif %}state=silent"><div class="label">Ни разу не писали</div><div class="value">{{ stats.never_wrote }}</div><div class="metric-foot">0 сообщений за всё время</div></a>
   <div class="card metric-card accent"><div class="label">Чатов</div><div class="value">{{ stats.tracked_chats }}</div><div class="metric-foot">На мониторинге</div></div>
 </div>
 
