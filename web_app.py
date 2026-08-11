@@ -23,8 +23,13 @@ from db import (
     add_system_admin,
     audit,
     dashboard_stats,
+    clear_admin_web_credentials,
     get_chat_info,
     get_chat_member_stats,
+    get_system_admin,
+    get_web_admin_by_user_id,
+    get_web_admin_by_username,
+    has_web_admin_credentials,
     init_db,
     get_chat_settings,
     list_known_chats,
@@ -38,19 +43,21 @@ from db import (
     set_chat_settings,
     set_chat_tracked,
     set_chat_hidden,
+    set_admin_web_credentials,
 )
 from settings_store import load_settings, save_settings
 from telethon_auth import TelethonAuthError, TelethonAuthManager
 from telethon_config import load_telethon_config, telethon_status
 from telegram_identity import UsernameResolveError, resolve_user_by_username
 from runtime_paths import DATA_DIR, DATABASE_PATH, load_or_create_web_secret, web_port, web_public_url
+from web_auth import hash_password, validate_login, verify_password
 
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OWNER_ID_ENV = (os.getenv("OWNER_ID") or "").strip()
-WEB_USERNAME = os.getenv("WEB_ADMIN_USERNAME", "admin")
-WEB_PASSWORD = os.getenv("WEB_ADMIN_PASSWORD", "")
+LEGACY_WEB_USERNAME = os.getenv("WEB_ADMIN_USERNAME", "admin")
+LEGACY_WEB_PASSWORD = os.getenv("WEB_ADMIN_PASSWORD", "")
 WEB_SECRET = load_or_create_web_secret()
 _PUBLIC_URL = web_public_url()
 _cookie_raw = os.getenv("WEB_COOKIE_SECURE")
@@ -155,14 +162,22 @@ def _sign(data: str) -> str:
     return hmac.new(WEB_SECRET.encode(), data.encode(), hashlib.sha256).hexdigest()
 
 
-def _new_session(username: str) -> str:
+def _new_session(
+    user_id: int,
+    username: str,
+    role: str,
+    *,
+    session_version: int = 0,
+    source: str = "db",
+) -> str:
     payload = {
+        "uid": int(user_id),
         "u": username,
         "exp": int(time.time()) + SESSION_TTL,
         "csrf": secrets.token_urlsafe(24),
-        # The current web credential is the owner console. Keeping the role in
-        # the signed session makes owner-only routes explicit and future-proof.
-        "role": "owner",
+        "role": "owner" if role == "owner" else "admin",
+        "sv": int(session_version),
+        "src": source,
     }
     body = _b64(json.dumps(payload, separators=(",", ":")).encode())
     return f"{body}.{_sign(body)}"
@@ -179,11 +194,38 @@ def _read_session(request: Request) -> dict | None:
         payload = json.loads(_unb64(body))
     except Exception:
         return None
-    if payload.get("u") != WEB_USERNAME or int(payload.get("exp", 0)) < int(time.time()):
+    if int(payload.get("exp", 0)) < int(time.time()):
         return None
-    # Sessions created by the previous release did not carry an explicit role.
-    # The only web credential in that release was the owner console.
-    payload.setdefault("role", "owner")
+
+    source = str(payload.get("src") or "legacy_env")
+    if source == "db":
+        try:
+            user_id = int(payload.get("uid"))
+        except (TypeError, ValueError):
+            return None
+        row = get_web_admin_by_user_id(user_id)
+        if not row or not int(row["web_enabled"] or 0):
+            return None
+        if not str(row["web_username"] or "") or not str(row["web_password_hash"] or ""):
+            return None
+        if str(row["web_username"]).casefold() != str(payload.get("u") or "").casefold():
+            return None
+        if int(row["web_session_version"] or 1) != int(payload.get("sv", 0)):
+            return None
+        payload["role"] = "owner" if int(row["is_owner"] or 0) else "admin"
+        payload["display_name"] = row["display_name"] or row["username"] or row["web_username"]
+        return payload
+
+    # Backward-compatible emergency owner login from Bothost environment.
+    # Removing WEB_ADMIN_PASSWORD from ENV disables this path and invalidates these sessions.
+    if not LEGACY_WEB_PASSWORD:
+        return None
+    if str(payload.get("u") or "") != LEGACY_WEB_USERNAME:
+        return None
+    payload["uid"] = OWNER_ID
+    payload["role"] = "owner"
+    payload["src"] = "legacy_env"
+    payload["display_name"] = "Owner"
     return payload
 
 
@@ -208,15 +250,26 @@ def require_owner_session(request: Request) -> dict:
     return session
 
 
+def _actor(request: Request) -> str:
+    session = _read_session(request)
+    if not session:
+        return "web:anonymous"
+    username = str(session.get("u") or "unknown")[:80]
+    uid = session.get("uid")
+    return f"web:{username}#{uid}" if uid is not None else f"web:{username}"
+
+
 def render(request: Request, name: str, **context):
     session = _read_session(request)
+    web_username = str(session.get("u") or "") if session else ""
     context.update(
         {
             "request": request,
             "session": session,
             "csrf": session.get("csrf") if session else "",
             "owner_id": OWNER_ID,
-            "web_username": WEB_USERNAME,
+            "web_username": web_username,
+            "web_user_id": session.get("uid") if session else None,
             "web_cookie_secure": WEB_COOKIE_SECURE,
             "is_owner": bool(session and session.get("role") == "owner"),
         }
@@ -244,34 +297,73 @@ async def auth_exception_handler(request: Request, exc: HTTPException):
 async def login_page(request: Request):
     if _read_session(request):
         return redirect("/")
-    return render(request, "login.html", configured=bool(WEB_PASSWORD), error=None)
+    configured = bool(LEGACY_WEB_PASSWORD) or has_web_admin_credentials()
+    return render(request, "login.html", configured=configured, error=None)
 
 
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
-    if not WEB_PASSWORD:
-        return render(request, "login.html", configured=False, error="WEB_ADMIN_PASSWORD не задан в окружении")
+    configured = bool(LEGACY_WEB_PASSWORD) or has_web_admin_credentials()
+    if not configured:
+        return render(request, "login.html", configured=False, error="Web-доступ ещё не настроен владельцем")
     if _login_is_blocked(request):
         audit(f"web:{username[:80]}", "login_rate_limited", details={"ip": _request_ip(request)})
         return render(request, "login.html", configured=True, error="Слишком много неудачных попыток. Повторите позже.")
-    valid_user = hmac.compare_digest(username.strip(), WEB_USERNAME)
-    valid_password = hmac.compare_digest(password, WEB_PASSWORD)
-    if not (valid_user and valid_password):
+
+    entered_login = username.strip()
+    db_admin = get_web_admin_by_username(entered_login)
+    login_user_id: int | None = None
+    login_role = "admin"
+    login_version = 0
+    login_source = "db"
+    login_name = entered_login
+
+    if (
+        db_admin
+        and int(db_admin["web_enabled"] or 0)
+        and str(db_admin["web_password_hash"] or "")
+        and verify_password(password, db_admin["web_password_hash"])
+    ):
+        login_user_id = int(db_admin["user_id"])
+        login_role = "owner" if int(db_admin["is_owner"] or 0) else "admin"
+        login_version = int(db_admin["web_session_version"] or 1)
+        login_name = str(db_admin["web_username"] or entered_login)
+    elif (
+        LEGACY_WEB_PASSWORD
+        and hmac.compare_digest(entered_login, LEGACY_WEB_USERNAME)
+        and hmac.compare_digest(password, LEGACY_WEB_PASSWORD)
+    ):
+        login_user_id = OWNER_ID
+        login_role = "owner"
+        login_source = "legacy_env"
+        login_name = LEGACY_WEB_USERNAME
+    else:
         _record_login_failure(request)
-        audit(f"web:{username[:80]}", "login_failed", details={"ip": _request_ip(request)})
+        audit(f"web:{entered_login[:80]}", "login_failed", details={"ip": _request_ip(request)})
         return render(request, "login.html", configured=True, error="Неверный логин или пароль")
+
     _clear_login_failures(request)
     response = redirect("/")
     response.set_cookie(
         COOKIE_NAME,
-        _new_session(WEB_USERNAME),
+        _new_session(
+            login_user_id,
+            login_name,
+            login_role,
+            session_version=login_version,
+            source=login_source,
+        ),
         httponly=True,
         secure=WEB_COOKIE_SECURE,
         samesite="lax",
         max_age=SESSION_TTL,
         path="/",
     )
-    audit(f"web:{WEB_USERNAME}", "login")
+    audit(
+        f"web:{login_name}#{login_user_id}",
+        "login",
+        details={"ip": _request_ip(request), "role": login_role, "source": login_source},
+    )
     return response
 
 
@@ -338,7 +430,7 @@ async def chat_hide(request: Request, chat_id: int, csrf: str = Form(...)):
     verify_csrf(request, csrf)
     if not set_chat_hidden(chat_id, True):
         raise HTTPException(status_code=400, detail="Некорректный чат")
-    audit(f"web:{WEB_USERNAME}", "chat_hidden", str(chat_id))
+    audit(_actor(request), "chat_hidden", str(chat_id))
     return redirect("/chats", "Чат скрыт. Отслеживание и алерты отключены.")
 
 
@@ -348,7 +440,7 @@ async def chat_restore(request: Request, chat_id: int, csrf: str = Form(...)):
     verify_csrf(request, csrf)
     if not set_chat_hidden(chat_id, False):
         raise HTTPException(status_code=400, detail="Некорректный чат")
-    audit(f"web:{WEB_USERNAME}", "chat_restored", str(chat_id))
+    audit(_actor(request), "chat_restored", str(chat_id))
     return redirect("/chats/hidden", "Чат возвращён в список доступных. Отслеживание остаётся выключенным до ручного включения.")
 
 
@@ -357,9 +449,9 @@ async def chat_track(request: Request, chat_id: int, csrf: str = Form(...), enab
     verify_csrf(request, csrf)
     if not set_chat_tracked(chat_id, bool(enabled)):
         raise HTTPException(status_code=400, detail="Можно отслеживать только group/supergroup")
-    audit(f"web:{WEB_USERNAME}", "chat_tracking", str(chat_id), {"enabled": bool(enabled)})
+    audit(_actor(request), "chat_tracking", str(chat_id), {"enabled": bool(enabled)})
     if enabled:
-        request_sync(chat_id, f"web:{WEB_USERNAME}", "full")
+        request_sync(chat_id, _actor(request), "full")
     return redirect("/chats", "Настройки отслеживания сохранены")
 
 
@@ -369,8 +461,8 @@ async def chat_sync(request: Request, chat_id: int, csrf: str = Form(...)):
     info = get_chat_info(chat_id)
     if not info or info.get("chat_type") not in {"group", "supergroup"} or int(info.get("is_hidden") or 0):
         raise HTTPException(status_code=400, detail="Некорректный или скрытый чат")
-    request_sync(chat_id, f"web:{WEB_USERNAME}", "full")
-    audit(f"web:{WEB_USERNAME}", "sync_requested", str(chat_id))
+    request_sync(chat_id, _actor(request), "full")
+    audit(_actor(request), "sync_requested", str(chat_id))
     return redirect("/chats", "Синхронизация поставлена в очередь")
 
 
@@ -397,7 +489,7 @@ async def chat_settings_submit(
         check_interval_minutes=check_interval_minutes,
         enabled=bool(alerts_enabled),
     )
-    audit(f"web:{WEB_USERNAME}", "chat_settings", str(chat_id))
+    audit(_actor(request), "chat_settings", str(chat_id))
     return redirect("/chats", "Настройки активности сохранены")
 
 
@@ -439,7 +531,7 @@ async def members_page(
 
 @app.get("/admins", response_class=HTMLResponse)
 async def admins_page(request: Request, msg: str | None = None):
-    require_session(request)
+    require_owner_session(request)
     return render(request, "admins.html", admins=list_system_admins(), msg=msg)
 
 
@@ -479,7 +571,7 @@ async def admins_add(
 
     add_system_admin(target_id, display_name=target_name, username=target_username)
     audit(
-        f"web:{WEB_USERNAME}",
+        _actor(request),
         "admin_added",
         str(target_id),
         {"username": target_username or "", "resolved_by": (resolved or {}).get("source", "manual_id")},
@@ -490,20 +582,82 @@ async def admins_add(
 
 @app.post("/admins/{user_id}/remove")
 async def admins_remove(request: Request, user_id: int, csrf: str = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     if not remove_system_admin(user_id):
         raise HTTPException(status_code=400, detail="Владельца удалить нельзя")
-    audit(f"web:{WEB_USERNAME}", "admin_removed", str(user_id))
+    audit(_actor(request), "admin_removed", str(user_id))
     return redirect("/admins", "Администратор удалён")
 
 
 @app.post("/admins/{user_id}/notifications")
 async def admins_notifications(request: Request, user_id: int, csrf: str = Form(...), enabled: int = Form(...)):
+    require_owner_session(request)
     verify_csrf(request, csrf)
     if not set_admin_notifications(user_id, bool(enabled)):
         raise HTTPException(status_code=404, detail="Администратор не найден")
-    audit(f"web:{WEB_USERNAME}", "admin_notifications", str(user_id), {"enabled": bool(enabled)})
+    audit(_actor(request), "admin_notifications", str(user_id), {"enabled": bool(enabled)})
     return redirect("/admins", "Оповещения обновлены")
+
+
+@app.post("/admins/{user_id}/web-access")
+async def admins_web_access(
+    request: Request,
+    user_id: int,
+    csrf: str = Form(...),
+    web_username: str = Form(...),
+    web_password: str = Form(""),
+    enabled: int = Form(0),
+):
+    require_owner_session(request)
+    verify_csrf(request, csrf)
+    actor = _actor(request)
+    admin = get_system_admin(user_id)
+    if not admin:
+        raise HTTPException(status_code=404, detail="Администратор не найден")
+    try:
+        login = validate_login(web_username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if LEGACY_WEB_PASSWORD and login.casefold() == LEGACY_WEB_USERNAME.casefold():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Логин {LEGACY_WEB_USERNAME} занят аварийным Owner-входом из WEB_ADMIN_USERNAME. Выберите другой логин или удалите WEB_ADMIN_PASSWORD из ENV после настройки отдельного Owner-аккаунта.",
+        )
+    password_hash = None
+    if web_password:
+        try:
+            password_hash = hash_password(web_password)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        if not set_admin_web_credentials(
+            user_id,
+            web_username=login,
+            password_hash=password_hash,
+            enabled=bool(enabled),
+        ):
+            raise HTTPException(status_code=404, detail="Администратор не найден")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    audit(
+        actor,
+        "admin_web_access_updated",
+        str(user_id),
+        {"web_username": login, "enabled": bool(enabled), "password_changed": bool(web_password)},
+    )
+    return redirect("/admins", f"Web-доступ для {login} обновлён. Старые сессии этого администратора сброшены.")
+
+
+@app.post("/admins/{user_id}/web-clear")
+async def admins_web_clear(request: Request, user_id: int, csrf: str = Form(...)):
+    require_owner_session(request)
+    verify_csrf(request, csrf)
+    actor = _actor(request)
+    if not clear_admin_web_credentials(user_id):
+        raise HTTPException(status_code=404, detail="Администратор не найден")
+    audit(actor, "admin_web_access_cleared", str(user_id))
+    return redirect("/admins", "Web-доступ удалён. Активные сессии администратора больше не действуют.")
 
 
 @app.get("/bot", response_class=HTMLResponse)
@@ -549,7 +703,7 @@ async def bot_settings_save(
         }
     )
     save_settings(current, OWNER_ID)
-    audit(f"web:{WEB_USERNAME}", "bot_settings")
+    audit(_actor(request), "bot_settings")
     return redirect("/bot", "Настройки бота сохранены")
 
 
@@ -570,7 +724,7 @@ async def bot_test_notification(
         raise HTTPException(status_code=400, detail="Получатель не является администратором")
     try:
         from bot_app import send_test_alert
-        await send_test_alert(int(recipient_id), int(chat_id), f"web:{WEB_USERNAME}")
+        await send_test_alert(int(recipient_id), int(chat_id), _actor(request))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Не удалось отправить тест: {str(exc)[:220]}")
     return redirect("/bot", "Тестовое оповещение отправлено")
@@ -590,7 +744,7 @@ async def member_nudge_from_web(
         raise HTTPException(status_code=400, detail="Пользователь больше не является активным участником группы")
     try:
         from bot_app import send_member_nudge
-        await send_member_nudge(int(chat_id), int(user_id), f"web:{WEB_USERNAME}")
+        await send_member_nudge(int(chat_id), int(user_id), _actor(request))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Не удалось отправить пинг: {str(exc)[:220]}")
     return redirect(f"/members?chat_id={int(chat_id)}", "Пинг участнику отправлен в группу")
@@ -667,7 +821,7 @@ async def telethon_configure(
         await telethon_auth.configure(parsed_api_id, selected_hash)
     except (ValueError, TelethonAuthError) as exc:
         return _telethon_page_response(request, error=str(exc))
-    audit(f"web:{WEB_USERNAME}", "telethon_configured")
+    audit(_actor(request), "telethon_configured")
     return redirect("/telethon", "API-данные сохранены. Теперь введите номер Telegram.")
 
 
@@ -680,7 +834,7 @@ async def telethon_check_existing(request: Request, csrf: str = Form(...)):
     except TelethonAuthError as exc:
         return _telethon_page_response(request, error=str(exc))
     if result.get("authorized"):
-        audit(f"web:{WEB_USERNAME}", "telethon_existing_session_verified")
+        audit(_actor(request), "telethon_existing_session_verified")
         return redirect("/telethon", "Существующая StringSession подтверждена и готова к работе.")
     return redirect("/telethon", "StringSession отсутствует или больше не авторизована. Введите номер телефона.")
 
@@ -694,9 +848,9 @@ async def telethon_qr_start(request: Request, csrf: str = Form(...)):
     except TelethonAuthError as exc:
         return _telethon_page_response(request, error=str(exc))
     if result.get("authorized"):
-        audit(f"web:{WEB_USERNAME}", "telethon_authorized_existing")
+        audit(_actor(request), "telethon_authorized_existing")
         return redirect("/telethon", "Telethon уже авторизован. Сессия готова к работе.")
-    audit(f"web:{WEB_USERNAME}", "telethon_qr_started")
+    audit(_actor(request), "telethon_qr_started")
     return redirect("/telethon", "QR-код создан. Отсканируйте его в Telegram → Настройки → Устройства → Подключить устройство.")
 
 
@@ -724,7 +878,7 @@ async def telethon_resend(request: Request, csrf: str = Form(...)):
         return _telethon_page_response(request, error=str(exc))
     info = result.get("code_info") or {}
     delivery = info.get("delivery") or "другой доступный способ"
-    audit(f"web:{WEB_USERNAME}", "telethon_code_resent", details={"delivery": delivery})
+    audit(_actor(request), "telethon_code_resent", details={"delivery": delivery})
     return redirect("/telethon", f"Telegram повторно отправил код: {delivery}.")
 
 
@@ -737,11 +891,11 @@ async def telethon_phone(request: Request, csrf: str = Form(...), phone: str = F
     except TelethonAuthError as exc:
         return _telethon_page_response(request, error=str(exc))
     if result.get("authorized"):
-        audit(f"web:{WEB_USERNAME}", "telethon_authorized_existing")
+        audit(_actor(request), "telethon_authorized_existing")
         return redirect("/telethon", "Telethon уже был авторизован. Сессия готова к работе.")
     info = result.get("code_info") or {}
     delivery = info.get("delivery") or "выбранный Telegram способ"
-    audit(f"web:{WEB_USERNAME}", "telethon_code_requested", details={"delivery": delivery})
+    audit(_actor(request), "telethon_code_requested", details={"delivery": delivery})
     return redirect("/telethon", f"Telegram принял запрос. Способ доставки: {delivery}.")
 
 
@@ -755,7 +909,7 @@ async def telethon_code(request: Request, csrf: str = Form(...), code: str = For
         return _telethon_page_response(request, error=str(exc))
     if result.get("step") == "password":
         return redirect("/telethon", "Для аккаунта включена двухэтапная аутентификация. Введите пароль.")
-    audit(f"web:{WEB_USERNAME}", "telethon_authorized")
+    audit(_actor(request), "telethon_authorized")
     return redirect("/telethon", "Telethon успешно подключён.")
 
 
@@ -767,7 +921,7 @@ async def telethon_password(request: Request, csrf: str = Form(...), password: s
         await telethon_auth.submit_password(password)
     except TelethonAuthError as exc:
         return _telethon_page_response(request, error=str(exc))
-    audit(f"web:{WEB_USERNAME}", "telethon_authorized_2fa")
+    audit(_actor(request), "telethon_authorized_2fa")
     return redirect("/telethon", "Telethon успешно подключён с 2FA.")
 
 
@@ -780,7 +934,7 @@ async def telethon_enabled(request: Request, csrf: str = Form(...), enabled: int
         return _telethon_page_response(request, error="Сначала завершите авторизацию Telethon.")
     from telethon_config import save_telethon_config
     save_telethon_config(enabled=bool(enabled))
-    audit(f"web:{WEB_USERNAME}", "telethon_enabled", details={"enabled": bool(enabled)})
+    audit(_actor(request), "telethon_enabled", details={"enabled": bool(enabled)})
     return redirect("/telethon", "Синхронизация Telethon включена." if enabled else "Синхронизация Telethon остановлена.")
 
 
@@ -789,7 +943,7 @@ async def telethon_cancel(request: Request, csrf: str = Form(...)):
     require_owner_session(request)
     verify_csrf(request, csrf)
     await telethon_auth.reset(clear_pending=True)
-    audit(f"web:{WEB_USERNAME}", "telethon_setup_cancelled")
+    audit(_actor(request), "telethon_setup_cancelled")
     return redirect("/telethon", "Мастер авторизации сброшен. Можно запросить новый код.")
 
 
@@ -809,7 +963,7 @@ async def health(request: Request):
             "domain_detected": bool((os.getenv("DOMAIN") or "").strip()),
             "bot_token_set": bool((os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("API_TOKEN") or "").strip()),
             "owner_id_set": bool((os.getenv("OWNER_ID") or "").strip()),
-            "web_password_set": bool((os.getenv("WEB_ADMIN_PASSWORD") or "").strip()),
+            "web_login_available": bool(LEGACY_WEB_PASSWORD) or has_web_admin_credentials(),
             "data_dir_exists": DATA_DIR.exists(),
             "database_exists": DATABASE_PATH.exists(),
         },

@@ -147,6 +147,11 @@ def init_db() -> None:
                 username TEXT,
                 is_owner INTEGER NOT NULL DEFAULT 0,
                 notifications_enabled INTEGER NOT NULL DEFAULT 1,
+                web_username TEXT,
+                web_password_hash TEXT,
+                web_enabled INTEGER NOT NULL DEFAULT 0,
+                web_session_version INTEGER NOT NULL DEFAULT 1,
+                web_credentials_updated_at INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -204,6 +209,13 @@ def init_db() -> None:
         _add_column(conn, "chat_settings", "enabled", "INTEGER NOT NULL DEFAULT 1")
         _add_column(conn, "chat_settings", "last_check_at", "INTEGER NOT NULL DEFAULT 0")
         _add_column(conn, "inactivity_alerts", "alert_type", "TEXT NOT NULL DEFAULT 'inactivity'")
+
+        # Per-administrator Web Admin credentials. Passwords are stored only as hashes.
+        _add_column(conn, "system_admins", "web_username", "TEXT")
+        _add_column(conn, "system_admins", "web_password_hash", "TEXT")
+        _add_column(conn, "system_admins", "web_enabled", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "system_admins", "web_session_version", "INTEGER NOT NULL DEFAULT 1")
+        _add_column(conn, "system_admins", "web_credentials_updated_at", "INTEGER")
 
         alert_pk = [row["name"] for row in conn.execute("PRAGMA table_info(inactivity_alerts)") if row["pk"]]
         if alert_pk != ["chat_id", "user_id", "alert_type"]:
@@ -334,6 +346,11 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_messages_sent ON seen_messages(sent_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_last ON inactivity_alerts(chat_id, user_id, last_alerted_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_requests_status ON sync_requests(status, requested_at)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_system_admins_web_username_ci "
+            "ON system_admins(LOWER(web_username)) "
+            "WHERE web_username IS NOT NULL AND TRIM(web_username) <> ''"
+        )
         conn.commit()
 
 
@@ -923,8 +940,112 @@ def is_system_admin(user_id: int) -> bool:
 
 
 def list_system_admins() -> list[sqlite3.Row]:
+    # Never expose password hashes to templates/callers that only need admin metadata.
     with get_conn() as conn:
-        return conn.execute("SELECT * FROM system_admins ORDER BY is_owner DESC, created_at, user_id").fetchall()
+        return conn.execute(
+            """
+            SELECT user_id, display_name, username, is_owner, notifications_enabled,
+                   web_username, web_enabled, web_session_version, web_credentials_updated_at,
+                   CASE WHEN COALESCE(web_password_hash,'') <> '' THEN 1 ELSE 0 END AS web_password_set,
+                   created_at, updated_at
+            FROM system_admins
+            ORDER BY is_owner DESC, created_at, user_id
+            """
+        ).fetchall()
+
+
+def get_system_admin(user_id: int) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT user_id, display_name, username, is_owner, notifications_enabled,
+                   web_username, web_enabled, web_session_version, web_credentials_updated_at,
+                   CASE WHEN COALESCE(web_password_hash,'') <> '' THEN 1 ELSE 0 END AS web_password_set,
+                   created_at, updated_at
+            FROM system_admins WHERE user_id=?
+            """,
+            (int(user_id),),
+        ).fetchone()
+
+
+def get_web_admin_by_username(web_username: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM system_admins WHERE LOWER(COALESCE(web_username,''))=LOWER(?) LIMIT 1",
+            ((web_username or '').strip(),),
+        ).fetchone()
+
+
+def get_web_admin_by_user_id(user_id: int) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM system_admins WHERE user_id=?", (int(user_id),)).fetchone()
+
+
+def has_web_admin_credentials() -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM system_admins "
+            "WHERE web_enabled=1 AND COALESCE(web_username,'')<>'' AND COALESCE(web_password_hash,'')<>'' LIMIT 1"
+        ).fetchone()
+    return bool(row)
+
+
+def set_admin_web_credentials(
+    user_id: int,
+    *,
+    web_username: str,
+    password_hash: str | None = None,
+    enabled: bool = True,
+) -> bool:
+    now_ts = int(time.time())
+    login = (web_username or '').strip()
+    if not login:
+        raise ValueError("Web-логин не может быть пустым")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT web_password_hash FROM system_admins WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()
+        if not row:
+            return False
+        current_hash = str(row["web_password_hash"] or "")
+        if not password_hash and not current_hash:
+            raise ValueError("Для первого включения web-доступа нужно задать пароль")
+        try:
+            conn.execute(
+                """
+                UPDATE system_admins
+                SET web_username=?,
+                    web_password_hash=CASE WHEN ? IS NULL THEN web_password_hash ELSE ? END,
+                    web_enabled=?,
+                    web_session_version=COALESCE(web_session_version,1)+1,
+                    web_credentials_updated_at=?,
+                    updated_at=?
+                WHERE user_id=?
+                """,
+                (login, password_hash, password_hash, 1 if enabled else 0, now_ts, now_ts, int(user_id)),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Такой web-логин уже используется другим администратором") from exc
+    return True
+
+
+def clear_admin_web_credentials(user_id: int) -> bool:
+    now_ts = int(time.time())
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            UPDATE system_admins
+            SET web_username=NULL, web_password_hash=NULL, web_enabled=0,
+                web_session_version=COALESCE(web_session_version,1)+1,
+                web_credentials_updated_at=?, updated_at=?
+            WHERE user_id=?
+            """,
+            (now_ts, now_ts, int(user_id)),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
 
 
 def list_admin_ids(*, notifications_only: bool = False) -> list[int]:

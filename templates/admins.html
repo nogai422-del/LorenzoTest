@@ -5,29 +5,46 @@
   <div>
     <span class="eyebrow">Access control</span>
     <h1>Администраторы</h1>
-    <div class="subtle">Управление доступом к Telegram-админке и получателями системных уведомлений.</div>
+    <div class="subtle">Telegram-права, системные уведомления и отдельные логины для Web Admin. Этот раздел доступен только владельцу.</div>
   </div>
 </div>
 {% if msg %}<div class="message">{{ msg }}</div>{% endif %}
-<div class="grid-2">
+
 <section class="panel">
-  <div class="panel-head"><div><h2>Текущие администраторы</h2><div class="subtle">Owner защищён от удаления. Уведомления переключаются отдельно для каждого администратора.</div></div></div>
+  <div class="panel-head">
+    <div>
+      <h2>Команда администраторов</h2>
+      <div class="subtle">Telegram-доступ и web-доступ управляются независимо. Удаление администратора автоматически отключает его web-учётку.</div>
+    </div>
+  </div>
   <div class="table-wrap desktop-table">
-  <table><thead><tr><th>Пользователь</th><th>Роль</th><th>Оповещения</th><th>Действие</th></tr></thead><tbody>
-  {% for a in admins %}
-  <tr>
-    <td><strong>{{ a.display_name or a.user_id }}</strong><div class="muted small">{{ a.username|tguser }} · {{ a.user_id }}</div></td>
-    <td>{% if a.is_owner %}<span class="badge warn">Owner</span>{% else %}<span class="badge">Admin</span>{% endif %}</td>
-    <td>
-      <form action="/admins/{{ a.user_id }}/notifications" method="post" class="inline-form">
-        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="enabled" value="{{ 0 if a.notifications_enabled else 1 }}">
-        <button class="btn" type="submit">{% if a.notifications_enabled %}Включены{% else %}Выключены{% endif %}</button>
-      </form>
-    </td>
-    <td>{% if not a.is_owner %}<form action="/admins/{{ a.user_id }}/remove" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn danger" type="submit">Удалить</button></form>{% else %}<span class="muted small">Защищён</span>{% endif %}</td>
-  </tr>
-  {% endfor %}
-  </tbody></table>
+    <table>
+      <thead><tr><th>Пользователь</th><th>Роль</th><th>Web Admin</th><th>Оповещения</th><th>Действие</th></tr></thead>
+      <tbody>
+      {% for a in admins %}
+      <tr>
+        <td><strong>{{ a.display_name or a.user_id }}</strong><div class="muted small">{{ a.username|tguser }} · {{ a.user_id }}</div></td>
+        <td>{% if a.is_owner %}<span class="badge warn">Owner</span>{% else %}<span class="badge">Admin</span>{% endif %}</td>
+        <td>
+          {% if a.web_username and a.web_password_set and a.web_enabled %}
+            <span class="badge ok">{{ a.web_username }}</span><div class="muted small">Вход разрешён</div>
+          {% elif a.web_username and a.web_password_set %}
+            <span class="badge">{{ a.web_username }}</span><div class="muted small">Вход отключён</div>
+          {% else %}
+            <span class="badge">Не настроен</span>
+          {% endif %}
+        </td>
+        <td>
+          <form action="/admins/{{ a.user_id }}/notifications" method="post" class="inline-form">
+            <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="enabled" value="{{ 0 if a.notifications_enabled else 1 }}">
+            <button class="btn" type="submit">{% if a.notifications_enabled %}Включены{% else %}Выключены{% endif %}</button>
+          </form>
+        </td>
+        <td>{% if not a.is_owner %}<form action="/admins/{{ a.user_id }}/remove" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn danger" type="submit">Удалить</button></form>{% else %}<span class="muted small">Защищён</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
   </div>
 
   <div class="mobile-list">
@@ -36,6 +53,10 @@
       <div class="mobile-data-head">
         <div><strong>{{ a.display_name or a.user_id }}</strong><div class="muted small">{{ a.username|tguser }} · {{ a.user_id }}</div></div>
         {% if a.is_owner %}<span class="badge warn">Owner</span>{% else %}<span class="badge">Admin</span>{% endif %}
+      </div>
+      <div class="mobile-stats-grid">
+        <div><span>Web</span><strong>{% if a.web_enabled and a.web_password_set %}{{ a.web_username }}{% elif a.web_username %}Отключён{% else %}Не настроен{% endif %}</strong></div>
+        <div><span>Оповещения</span><strong>{% if a.notifications_enabled %}Включены{% else %}Выключены{% endif %}</strong></div>
       </div>
       <div class="mobile-data-actions">
         <form action="/admins/{{ a.user_id }}/notifications" method="post">
@@ -50,6 +71,60 @@
 </section>
 
 <section class="panel">
+  <div class="panel-head">
+    <div>
+      <h2>Web-доступ администраторов</h2>
+      <div class="subtle">Создай каждому человеку отдельный логин и пароль. Пароль никогда не показывается и хранится только как PBKDF2-хэш.</div>
+    </div>
+  </div>
+  <div class="web-access-grid">
+    {% for a in admins %}
+    <article class="web-access-card">
+      <div class="web-access-head">
+        <div>
+          <div class="web-access-name">{{ a.display_name or a.username or a.user_id }}</div>
+          <div class="muted small">{{ a.username|tguser }} · Telegram ID {{ a.user_id }}</div>
+        </div>
+        {% if a.is_owner %}<span class="badge warn">Owner</span>{% elif a.web_enabled and a.web_password_set %}<span class="badge ok">Web включён</span>{% else %}<span class="badge">Web выключен</span>{% endif %}
+      </div>
+
+      <form action="/admins/{{ a.user_id }}/web-access" method="post" class="form-grid" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="wide">Логин для Web Admin
+          <input class="input" name="web_username" value="{{ a.web_username or '' }}" placeholder="например ivan.admin" autocomplete="off" required>
+        </label>
+        <label class="wide">{% if a.web_password_set %}Новый пароль <span class="muted">(оставь пустым, чтобы не менять)</span>{% else %}Пароль{% endif %}
+          <input class="input" type="password" name="web_password" placeholder="Минимум 10 символов" autocomplete="new-password" {% if not a.web_password_set %}required{% endif %}>
+        </label>
+        <label class="checkline wide web-enable-line">
+          <input type="checkbox" name="enabled" value="1" {% if a.web_enabled %}checked{% endif %}>
+          <span><strong>Разрешить вход в Web Admin</strong><span class="muted small">При выключении активные сессии этого администратора будут сброшены.</span></span>
+        </label>
+        <div class="wide panel-actions">
+          <button class="btn primary" type="submit">Сохранить web-доступ</button>
+        </div>
+      </form>
+
+      {% if a.web_username or a.web_password_set %}
+      <div class="web-access-footer">
+        <div class="muted small">Последнее изменение: {{ a.web_credentials_updated_at|dt }}</div>
+        <form action="/admins/{{ a.user_id }}/web-clear" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="btn danger" type="submit">Сбросить логин и пароль</button>
+        </form>
+      </div>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </div>
+  <div class="notice-box section-gap">
+    <b>Owner-вход из Bothost ENV</b>
+    <p>Старые <code>WEB_ADMIN_USERNAME</code> / <code>WEB_ADMIN_PASSWORD</code> остаются аварийным входом владельца для совместимости. После того как создашь отдельную web-учётку Owner и проверишь её, можешь удалить <code>WEB_ADMIN_PASSWORD</code> из ENV — тогда останутся только персональные логины.</p>
+  </div>
+</section>
+
+<div class="grid-2">
+<section class="panel">
   <div class="panel-head"><div><h2>Назначить администратора</h2><div class="subtle">Проще всего добавить по <code>@username</code>. При подключённом Telethon система сама получит реальный Telegram ID.</div></div></div>
   <form action="/admins/add" method="post" class="form-grid" autocomplete="off">
     <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -59,7 +134,16 @@
     <label class="wide">Имя вручную <span class="muted">(необязательно)</span><input class="input" name="display_name" placeholder="Оставь пустым для автоопределения"></label>
     <div class="wide panel-actions"><button class="btn primary" type="submit">Добавить администратора</button></div>
   </form>
-  <div class="notice-box section-gap"><b>Как работает @username</b><p>Сначала выполняется актуальная проверка через Telethon. Если Telethon временно недоступен, система может использовать уже синхронизированного участника с таким username. В права всегда сохраняется числовой Telegram ID.</p></div>
+</section>
+<section class="panel">
+  <div class="panel-head"><div><h2>Как работает доступ</h2><div class="subtle">Telegram-роль и web-учётка связаны через реальный Telegram ID.</div></div></div>
+  <div class="detail-list compact">
+    <div><span>Удалил администратора</span><strong>Web-вход пропал</strong></div>
+    <div><span>Сменил пароль</span><strong>Старые сессии сброшены</strong></div>
+    <div><span>Выключил Web</span><strong>Вход сразу закрыт</strong></div>
+    <div><span>Telethon</span><strong>Только Owner</strong></div>
+    <div><span>Скрытые чаты</span><strong>Только Owner</strong></div>
+  </div>
 </section>
 </div>
 {% endblock %}

@@ -95,7 +95,7 @@ https://ВАШ-ДОМЕН/health
   "config": {
     "bot_token_set": true,
     "owner_id_set": true,
-    "web_password_set": true,
+    "web_login_available": true,
     "data_dir_exists": true,
     "database_exists": true
   },
@@ -108,7 +108,11 @@ https://ВАШ-ДОМЕН/health
 
 После этого откройте корень домена. Он должен перевести на `/login`.
 
-Вход: значения `WEB_ADMIN_USERNAME` и `WEB_ADMIN_PASSWORD` из Bothost.
+Первый вход владельца: значения `WEB_ADMIN_USERNAME` и `WEB_ADMIN_PASSWORD` из Bothost.
+
+После входа откройте **Администраторы**. Для каждого Telegram-администратора можно задать отдельные `Web-логин` и `Пароль`, а также включить/выключить ему вход. Обычные администраторы не видят раздел управления учётками, Telethon и скрытые чаты.
+
+После создания отдельной web-учётки Owner и проверки входа можно удалить `WEB_ADMIN_PASSWORD` из ENV Bothost. Старый общий Owner-вход перестанет работать, персональные учётки останутся в `/app/data/bot.db`.
 
 ## 6. Проверка Telegram-бота
 

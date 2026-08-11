@@ -24,9 +24,9 @@
       </div>
     </section>
     <section class="panel login-card">
-      <div class="login-card-head"><h2>Вход в панель</h2><div class="subtle">Введите учётные данные Web Admin.</div></div>
+      <div class="login-card-head"><h2>Вход в панель</h2><div class="subtle">Введите свой персональный логин и пароль Web Admin.</div></div>
       {% if error %}<div class="error" style="margin-top:16px">{{ error }}</div>{% endif %}
-      {% if not configured %}<div class="error" style="margin-top:16px">Задайте <code>WEB_ADMIN_PASSWORD</code> в переменных окружения.</div>{% endif %}
+      {% if not configured %}<div class="error" style="margin-top:16px">Web-доступ ещё не настроен. Владелец должен создать персональную учётную запись администратора.</div>{% endif %}
       <form method="post" action="/login">
         <label>Логин<input class="input" name="username" autocomplete="username" required></label>
         <label>Пароль<input class="input" type="password" name="password" autocomplete="current-password" required></label>

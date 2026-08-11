@@ -27,6 +27,7 @@
 </section>
 
 <aside class="panel">
+  {% if is_owner %}
   <div class="panel-head"><div><h2>Тест оповещений</h2><div class="subtle">Отправляет настоящий тестовый алерт выбранному администратору, не меняя статистику.</div></div></div>
   {% if chats and admins %}
   <form action="/bot/test-notification" method="post" class="form-grid">
@@ -37,6 +38,10 @@
   </form>
   <div class="notice-box section-gap"><b>Telegram-тест тоже доступен</b><p>В боте: <code>/admin → Оповещения → Тест оповещения мне</code>.</p></div>
   {% else %}<div class="empty">Для теста нужен хотя бы один отслеживаемый чат и администратор.</div>{% endif %}
+  {% else %}
+  <div class="panel-head"><div><h2>Персональный Web-доступ</h2><div class="subtle">Ты вошёл под отдельной учётной записью администратора.</div></div></div>
+  <div class="notice-box"><b>Owner-only функции скрыты</b><p>Управление web-аккаунтами, Telethon, скрытыми чатами и тестовой рассылкой доступно только владельцу.</p></div>
+  {% endif %}
 </aside>
 </div>
 {% endblock %}
