@@ -1,33 +1,56 @@
 {% extends "base.html" %}
 {% block title %}Обзор — Lorenzo Admin{% endblock %}
 {% block content %}
-<div class="topbar">
+<div class="topbar page-hero">
   <div>
+    <span class="eyebrow">Analytics dashboard</span>
     <h1>Активность сообщества</h1>
-    <div class="subtle">Статистика строится по сообщениям внутри групп; Telegram last seen используется как дополнительный сигнал.</div>
+    <div class="subtle">Профессиональная сводка по участникам, сообщениям и качеству вовлечения. Основная метрика активности строится по действиям внутри групп.</div>
   </div>
-  <form method="get" class="toolbar">
-    <select name="chat_id" onchange="this.form.submit()" style="min-width:230px">
-      <option value="">Все отслеживаемые чаты</option>
-      {% for chat in chats %}
-      <option value="{{ chat.chat_id }}" {% if selected_chat_id == chat.chat_id %}selected{% endif %}>{{ chat.title or chat.username or chat.chat_id }}</option>
-      {% endfor %}
-    </select>
+  <form method="get" class="toolbar hero-actions">
+    <div class="select-shell">
+      <select name="chat_id" onchange="this.form.submit()" style="min-width:240px">
+        <option value="">Все отслеживаемые чаты</option>
+        {% for chat in chats %}
+        <option value="{{ chat.chat_id }}" {% if selected_chat_id == chat.chat_id %}selected{% endif %}>{{ chat.title or chat.username or chat.chat_id }}</option>
+        {% endfor %}
+      </select>
+    </div>
   </form>
 </div>
 {% if msg %}<div class="message">{{ msg }}</div>{% endif %}
-<div class="cards">
-  <div class="card"><div class="label">Участников</div><div class="value">{{ stats.members }}</div></div>
-  <div class="card"><div class="label">Активны 24ч</div><div class="value">{{ stats.active_24h }}</div></div>
-  <div class="card"><div class="label">Активны 7д</div><div class="value">{{ stats.active_7d }}</div></div>
-  <div class="card"><div class="label">Неактивны 7д+</div><div class="value">{{ stats.inactive_7d }}</div></div>
-  <div class="card"><div class="label">Новые 7д</div><div class="value">{{ stats.joined_7d }}</div></div>
-  <div class="card"><div class="label">Вышли 7д</div><div class="value">{{ stats.left_7d }}</div></div>
-  <div class="card"><div class="label">Чатов</div><div class="value">{{ stats.tracked_chats }}</div></div>
+
+<div class="hero-strip panel">
+  <div>
+    <div class="hero-strip-title">Операционная картина</div>
+    <div class="hero-strip-text">Панель объединяет Telegram Bot API и Telethon, чтобы ты видел живую структуру сообщества, новых участников, отток и динамику активности без ручной сверки.</div>
+  </div>
+  <div class="hero-badges">
+    <span class="badge ok">Live metrics</span>
+    <span class="badge">30-day timeline</span>
+    <span class="badge warn">Retention tracking</span>
+  </div>
 </div>
-<div class="grid-2">
-  <section class="panel">
-    <h2>Сообщения за 30 дней</h2>
+
+<div class="cards cards-7">
+  <div class="card metric-card"><div class="label">Участников</div><div class="value">{{ stats.members }}</div><div class="metric-foot">Всего по фильтру</div></div>
+  <div class="card metric-card"><div class="label">Активны 24ч</div><div class="value">{{ stats.active_24h }}</div><div class="metric-foot">Последние сутки</div></div>
+  <div class="card metric-card"><div class="label">Активны 7д</div><div class="value">{{ stats.active_7d }}</div><div class="metric-foot">Неделя</div></div>
+  <div class="card metric-card"><div class="label">Неактивны 7д+</div><div class="value">{{ stats.inactive_7d }}</div><div class="metric-foot">Нуждаются во внимании</div></div>
+  <div class="card metric-card"><div class="label">Новые 7д</div><div class="value">{{ stats.joined_7d }}</div><div class="metric-foot">Новые участники</div></div>
+  <div class="card metric-card"><div class="label">Вышли 7д</div><div class="value">{{ stats.left_7d }}</div><div class="metric-foot">Отток</div></div>
+  <div class="card metric-card accent"><div class="label">Чатов</div><div class="value">{{ stats.tracked_chats }}</div><div class="metric-foot">На мониторинге</div></div>
+</div>
+
+<div class="grid-2 wide-main">
+  <section class="panel chart-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Сообщения за 30 дней</h2>
+        <div class="subtle">Ежедневная интенсивность общения и авторская активность в отслеживаемых чатах.</div>
+      </div>
+      <span class="badge">max {{ max_messages }}</span>
+    </div>
     <div class="chart" aria-label="График сообщений">
       {% for row in series %}
       <div class="bar-wrap">
@@ -37,11 +60,22 @@
       {% endfor %}
     </div>
   </section>
-  <section class="panel">
-    <h2>Как считается активность</h2>
-    <p class="muted">Основной показатель — последнее сообщение участника именно в выбранной группе. Для новых участников без сообщений действует отсчёт от даты вступления/первого обнаружения.</p>
-    <p class="muted">Telethon синхронизирует состав группы и доступный Telegram presence, но скрытый privacy-статус не подменяет реальную активность в группе.</p>
-    <a class="btn primary" href="/chats">Управлять синхронизацией</a>
+  <section class="panel insight-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Как читать аналитику</h2>
+        <div class="subtle">Быстрая расшифровка показателей для ежедневной работы.</div>
+      </div>
+    </div>
+    <div class="insight-list">
+      <div class="insight-item"><span class="insight-mark ok"></span><div><strong>Активность</strong><p>Главный показатель — последнее сообщение участника именно в группе, а не общий online в Telegram.</p></div></div>
+      <div class="insight-item"><span class="insight-mark"></span><div><strong>Новые участники</strong><p>Для тех, кто ещё не писал, активность отсчитывается от даты вступления или первого обнаружения.</p></div></div>
+      <div class="insight-item"><span class="insight-mark warn"></span><div><strong>Presence</strong><p>Telegram status используется как дополнительный сигнал и не подменяет реальные действия внутри сообщества.</p></div></div>
+    </div>
+    <div class="panel-actions">
+      <a class="btn primary" href="/chats">Управлять чатами</a>
+      <a class="btn" href="/members">Открыть участников</a>
+    </div>
   </section>
 </div>
 {% endblock %}

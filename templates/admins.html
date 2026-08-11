@@ -1,13 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Администраторы — Lorenzo Admin{% endblock %}
 {% block content %}
-<div class="topbar"><div><h1>Администраторы</h1><div class="subtle">Эти пользователи получают доступ к Telegram-админке. Получателей уведомлений можно включать независимо.</div></div></div>
+<div class="topbar">
+  <div>
+    <span class="eyebrow">Access control</span>
+    <h1>Администраторы</h1>
+    <div class="subtle">Управление ролями, доступом к Telegram-админке и уведомлениями без показа админ-функций обычным пользователям.</div>
+  </div>
+</div>
 {% if msg %}<div class="message">{{ msg }}</div>{% endif %}
 <div class="grid-2">
 <section class="panel">
-  <h2>Текущие администраторы</h2>
+  <div class="panel-head">
+    <div>
+      <h2>Текущие администраторы</h2>
+      <div class="subtle">Owner имеет полный контроль. У остальных администраторов можно отдельно включать и выключать уведомления.</div>
+    </div>
+  </div>
   <div class="table-wrap">
-  <table><thead><tr><th>Пользователь</th><th>Роль</th><th>Оповещения</th><th></th></tr></thead><tbody>
+  <table><thead><tr><th>Пользователь</th><th>Роль</th><th>Оповещения</th><th>Действие</th></tr></thead><tbody>
   {% for a in admins %}
   <tr>
     <td><strong>{{ a.display_name or a.user_id }}</strong><div class="muted small">{{ a.username|tguser }} · {{ a.user_id }}</div></td>
@@ -18,22 +29,26 @@
         <button class="btn" type="submit">{% if a.notifications_enabled %}🔔 Включены{% else %}🔕 Выключены{% endif %}</button>
       </form>
     </td>
-    <td>{% if not a.is_owner %}<form action="/admins/{{ a.user_id }}/remove" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn danger" type="submit">Удалить</button></form>{% endif %}</td>
+    <td>{% if not a.is_owner %}<form action="/admins/{{ a.user_id }}/remove" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn danger" type="submit">Удалить</button></form>{% else %}<span class="muted small">Защищённый аккаунт</span>{% endif %}</td>
   </tr>
   {% endfor %}
   </tbody></table>
   </div>
 </section>
 <section class="panel">
-  <h2>Назначить администратора</h2>
+  <div class="panel-head">
+    <div>
+      <h2>Назначить администратора</h2>
+      <div class="subtle">После назначения пользователь сразу получает доступ к <code>/admin</code> и веб-функциям по текущей модели прав.</div>
+    </div>
+  </div>
   <form action="/admins/add" method="post" class="form-grid">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label class="wide">Telegram user ID<input class="input" type="number" name="user_id" required></label>
     <label>Имя<input class="input" name="display_name" placeholder="Необязательно"></label>
     <label>Username<input class="input" name="username" placeholder="@username"></label>
-    <div class="wide"><button class="btn primary" type="submit">Добавить</button></div>
+    <div class="wide panel-actions"><button class="btn primary" type="submit">Добавить администратора</button></div>
   </form>
-  <p class="muted small">После назначения пользователь сможет открыть <code>/admin</code>. Обычным пользователям админ-команды не публикуются.</p>
 </section>
 </div>
 {% endblock %}

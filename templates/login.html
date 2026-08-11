@@ -7,17 +7,32 @@
   <link rel="stylesheet" href="{{ url_for('static', path='admin.css') }}">
 </head>
 <body class="login-page">
-  <section class="card login-card">
-    <div class="brand" style="margin:0 0 18px"><span class="brand-mark">L</span><span>Lorenzo Admin</span></div>
-    <h1>Панель статистики</h1>
-    <div class="subtle">Участники, активность, синхронизация Telethon и настройки уведомлений.</div>
-    {% if error %}<div class="error" style="margin-top:16px">{{ error }}</div>{% endif %}
-    {% if not configured %}<div class="error" style="margin-top:16px">Задайте <code>WEB_ADMIN_PASSWORD</code> в файле <code>.env</code>.</div>{% endif %}
-    <form method="post" action="/login">
-      <label>Логин<input class="input" name="username" autocomplete="username" required></label>
-      <label>Пароль<input class="input" type="password" name="password" autocomplete="current-password" required></label>
-      <button class="btn primary" type="submit">Войти</button>
-    </form>
-  </section>
+  <div class="login-layout">
+    <section class="login-showcase panel">
+      <span class="eyebrow">Professional admin panel</span>
+      <div class="brand brand-large" style="margin:0 0 22px"><span class="brand-mark">L</span><div><span class="brand-name">Lorenzo Admin</span><span class="brand-subtitle">Community Intelligence</span></div></div>
+      <h1>Современная панель управления Telegram-сообществом</h1>
+      <div class="subtle">Метрики, участники, Telethon-синхронизация, уведомления и управление ролями — в едином профессиональном интерфейсе.</div>
+      <div class="login-feature-grid">
+        <div class="mini-card"><strong>Live analytics</strong><span>Статистика по участникам и сообщениям в реальном времени.</span></div>
+        <div class="mini-card"><strong>Telethon sync</strong><span>Глубокая синхронизация состава чатов и активности.</span></div>
+        <div class="mini-card"><strong>Secure access</strong><span>Авторизация, CSRF-защита и разграничение ролей.</span></div>
+      </div>
+    </section>
+
+    <section class="card login-card panel">
+      <div class="login-card-head">
+        <h2>Вход в панель</h2>
+        <div class="subtle">Используй учётные данные администратора для продолжения.</div>
+      </div>
+      {% if error %}<div class="error" style="margin-top:16px">{{ error }}</div>{% endif %}
+      {% if not configured %}<div class="error" style="margin-top:16px">Задайте <code>WEB_ADMIN_PASSWORD</code> в файле <code>.env</code>.</div>{% endif %}
+      <form method="post" action="/login">
+        <label>Логин<input class="input" name="username" autocomplete="username" required></label>
+        <label>Пароль<input class="input" type="password" name="password" autocomplete="current-password" required></label>
+        <button class="btn primary block" type="submit">Войти в Lorenzo Admin</button>
+      </form>
+    </section>
+  </div>
 </body>
 </html>

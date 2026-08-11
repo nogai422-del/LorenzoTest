@@ -7,27 +7,57 @@
   <link rel="stylesheet" href="{{ url_for('static', path='admin.css') }}">
 </head>
 <body>
+<div class="app-bg"></div>
 <div class="shell">
   <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">L</span><span>Lorenzo Admin</span></div>
+    <div class="brand-wrap">
+      <div class="brand">
+        <span class="brand-mark">L</span>
+        <div>
+          <span class="brand-name">Lorenzo Admin</span>
+          <span class="brand-subtitle">Community Intelligence</span>
+        </div>
+      </div>
+      <div class="sidebar-status">
+        <span class="status-dot"></span>
+        <div>
+          <strong>Система запущена</strong>
+          <div class="muted small">Веб-панель, бот и синхронизация</div>
+        </div>
+      </div>
+    </div>
+
     <nav class="nav">
-      <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">📊 Обзор</a>
-      <a href="/chats" class="{% if request.url.path.startswith('/chats') %}active{% endif %}">💬 Чаты</a>
-      <a href="/members" class="{% if request.url.path.startswith('/members') %}active{% endif %}">👥 Участники</a>
-      <a href="/admins" class="{% if request.url.path.startswith('/admins') %}active{% endif %}">🛡️ Администраторы</a>
-      <a href="/telethon" class="{% if request.url.path.startswith('/telethon') %}active{% endif %}">🔐 Telethon</a>
-      <a href="/bot" class="{% if request.url.path.startswith('/bot') %}active{% endif %}">⚙️ Бот</a>
+      <div class="nav-group-label">Навигация</div>
+      <a href="/" class="{% if request.url.path == '/' %}active{% endif %}"><span class="nav-icon">📊</span><span>Обзор</span></a>
+      <a href="/chats" class="{% if request.url.path.startswith('/chats') %}active{% endif %}"><span class="nav-icon">💬</span><span>Чаты</span></a>
+      <a href="/members" class="{% if request.url.path.startswith('/members') %}active{% endif %}"><span class="nav-icon">👥</span><span>Участники</span></a>
+      <a href="/admins" class="{% if request.url.path.startswith('/admins') %}active{% endif %}"><span class="nav-icon">🛡️</span><span>Администраторы</span></a>
+
+      <div class="nav-group-label nav-spacer">Интеграции</div>
+      <a href="/telethon" class="{% if request.url.path.startswith('/telethon') %}active{% endif %}"><span class="nav-icon">🔐</span><span>Telethon</span></a>
+      <a href="/bot" class="{% if request.url.path.startswith('/bot') %}active{% endif %}"><span class="nav-icon">⚙️</span><span>Бот</span></a>
     </nav>
-    <div class="sidebar-bottom">
-      <div class="muted small" style="margin:0 0 10px 4px">Вход: {{ web_username }}</div>
+
+    <div class="sidebar-footer">
+      <div class="profile-card">
+        <div class="profile-avatar">{{ (web_username or 'A')[:1]|upper }}</div>
+        <div class="profile-meta">
+          <div class="profile-label">Авторизован как</div>
+          <div class="profile-name">{{ web_username }}</div>
+        </div>
+      </div>
       <form action="/logout" method="post">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="btn ghost" type="submit" style="width:100%">Выйти</button>
+        <button class="btn ghost block" type="submit">Выйти</button>
       </form>
     </div>
   </aside>
+
   <main class="main">
-    {% block content %}{% endblock %}
+    <div class="main-shell">
+      {% block content %}{% endblock %}
+    </div>
   </main>
 </div>
 </body>
