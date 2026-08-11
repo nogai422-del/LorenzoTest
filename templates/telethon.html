@@ -5,7 +5,7 @@
   <div>
     <span class="eyebrow">Telegram account connection</span>
     <h1>Подключение Telethon</h1>
-    <div class="subtle">Пошаговый мастер для авторизации личного Telegram-аккаунта и запуска глубокой синхронизации групп, участников и активности.</div>
+    <div class="subtle">Авторизация личного Telegram-аккаунта для синхронизации групп, участников и активности. Для хостинга рекомендуем QR-вход — он не зависит от доставки SMS/кода.</div>
   </div>
   <span class="badge {{ telethon.status_kind }} hero-badge">{{ telethon.status_label }}</span>
 </div>
@@ -14,8 +14,8 @@
 
 <div class="setup-steps glass-strip">
   <div class="setup-step {% if telethon.configured %}done{% elif auth_step == 'config' %}current{% endif %}"><b>1</b><span>API данные</span></div>
-  <div class="setup-step {% if auth_step in ['code','password','done'] %}done{% elif auth_step == 'phone' %}current{% endif %}"><b>2</b><span>Телефон</span></div>
-  <div class="setup-step {% if auth_step in ['password','done'] %}done{% elif auth_step == 'code' %}current{% endif %}"><b>3</b><span>Код</span></div>
+  <div class="setup-step {% if auth_step in ['qr','code','password','done'] %}done{% elif auth_step == 'phone' %}current{% endif %}"><b>2</b><span>Способ входа</span></div>
+  <div class="setup-step {% if auth_step in ['password','done'] %}done{% elif auth_step in ['qr','code','qr_expired','qr_error'] %}current{% endif %}"><b>3</b><span>Подтверждение</span></div>
   <div class="setup-step {% if auth_step == 'done' %}done{% elif auth_step == 'password' %}current{% endif %}"><b>4</b><span>2FA</span></div>
 </div>
 
@@ -24,9 +24,10 @@
     {% if auth_step == 'done' %}
       <div class="panel-head">
         <div>
-          <h2>✅ Telethon подключён</h2>
+          <h2>Telethon подключён</h2>
           <div class="subtle">Аккаунт авторизован, StringSession сохранена и готова к работе после рестартов и обновлений.</div>
         </div>
+        <span class="badge ok">Connected</span>
       </div>
       {% set account = telethon.account %}
       <div class="detail-list">
@@ -35,7 +36,7 @@
         <div><span>User ID</span><strong>{{ account.id or '—' }}</strong></div>
         <div><span>Сессия</span><strong>StringSession</strong></div>
       </div>
-      <p class="muted">Worker подхватит StringSession автоматически и начнёт обнаружение групп. На Bothost эта конфигурация переживает обновления приложения.</p>
+      <p class="muted">Worker подхватит StringSession автоматически и начнёт обнаружение групп. Конфигурация хранится в persistent storage.</p>
       <form action="/telethon/enabled" method="post">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="enabled" value="{{ 0 if telethon.enabled else 1 }}">
@@ -43,7 +44,7 @@
       </form>
 
     {% elif auth_step == 'config' %}
-      <div class="panel-head"><div><h2>1. API ID и API Hash</h2><div class="subtle">Укажи значения из Telegram API development tools. Они сохраняются только локально на сервере.</div></div></div>
+      <div class="panel-head"><div><h2>1. API ID и API Hash</h2><div class="subtle">Укажи значения из my.telegram.org → API development tools. Они сохраняются только на сервере.</div></div></div>
       <form action="/telethon/configure" method="post" class="form-grid" autocomplete="off">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label>API ID<input class="input" inputmode="numeric" name="api_id" required placeholder="12345678" value="{{ telethon.api_id or '' }}"></label>
@@ -52,18 +53,36 @@
       </form>
 
     {% elif auth_step == 'phone' %}
-      <div class="panel-head"><div><h2>2. Номер Telegram</h2><div class="subtle">Введите номер аккаунта, который состоит в нужных группах. Номер не записывается в конфиг или БД.</div></div></div>
+      <div class="panel-head"><div><h2>2. Выберите способ входа</h2><div class="subtle">На облачном хостинге QR-вход обычно надёжнее: код не нужно ждать по SMS или в служебном чате.</div></div></div>
+
+      <div class="auth-methods">
+        <div class="auth-method recommended">
+          <div class="auth-method-head"><span class="method-icon">QR</span><div><strong>QR-вход</strong><span>Рекомендуется на Bothost</span></div></div>
+          <p>Откройте Telegram на уже авторизованном телефоне: <b>Настройки → Устройства → Подключить устройство</b> и отсканируйте QR.</p>
+          <form action="/telethon/qr" method="post">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="btn primary block" type="submit">Создать QR-код</button>
+          </form>
+        </div>
+
+        <div class="auth-method">
+          <div class="auth-method-head"><span class="method-icon">#</span><div><strong>Код по номеру</strong><span>Резервный способ</span></div></div>
+          <p>Telegram сам решит, куда доставить код: в приложение, email, Fragment или другим доступным способом. SMS для стороннего клиента не гарантируется.</p>
+          <form action="/telethon/phone" method="post" class="form-grid" autocomplete="off">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <label class="wide">Телефон с кодом страны<input class="input" type="tel" name="phone" required placeholder="+491234567890" autocomplete="tel"></label>
+            <div class="wide"><button class="btn block" type="submit">Запросить код</button></div>
+          </form>
+        </div>
+      </div>
+
       {% if telethon.has_session %}
-      <form action="/telethon/check" method="post" style="margin-bottom:16px">
+      <form action="/telethon/check" method="post" style="margin-top:16px">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="btn" type="submit">Проверить сохранённую StringSession</button>
       </form>
       {% endif %}
-      <form action="/telethon/phone" method="post" class="form-grid" autocomplete="off">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label class="wide">Телефон с кодом страны<input class="input" type="tel" name="phone" required placeholder="+491234567890" autocomplete="tel"></label>
-        <div class="wide panel-actions"><button class="btn primary" type="submit">Получить код Telegram</button></div>
-      </form>
+
       <details class="advanced-box">
         <summary>Изменить API-настройки</summary>
         <form action="/telethon/configure" method="post" class="form-grid" autocomplete="off" style="margin-top:14px">
@@ -74,20 +93,57 @@
         </form>
       </details>
 
+    {% elif auth_step == 'qr' %}
+      <div class="panel-head"><div><h2>3. Отсканируйте QR-код</h2><div class="subtle">QR временный. Страница сама обновится после успешного сканирования.</div></div><span class="badge ok">Ожидаем сканирование</span></div>
+      <div class="qr-login-box">
+        <div class="qr-frame">
+          {% if qr_image %}<img src="{{ qr_image }}" alt="Telegram QR login" class="qr-image">{% else %}<div class="error">Не удалось отрисовать QR. Убедитесь, что зависимость qrcode установлена.</div>{% endif %}
+        </div>
+        <div class="qr-steps">
+          <div><b>1</b><span>Откройте Telegram на телефоне, где этот аккаунт уже авторизован.</span></div>
+          <div><b>2</b><span>Перейдите: Настройки → Устройства → Подключить устройство.</span></div>
+          <div><b>3</b><span>Отсканируйте этот QR-код. Не закрывайте страницу до завершения.</span></div>
+        </div>
+      </div>
+      <div class="panel-actions" style="margin-top:18px">
+        {% if qr_deep_link %}<a class="btn" href="{{ qr_deep_link }}">Открыть в Telegram на этом устройстве</a>{% endif %}
+        <form action="/telethon/qr" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Обновить QR</button></form>
+        <form action="/telethon/cancel" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn ghost" type="submit">Отмена</button></form>
+      </div>
+
+    {% elif auth_step in ['qr_expired','qr_error'] %}
+      <div class="panel-head"><div><h2>QR нужно обновить</h2><div class="subtle">{{ auth_info.qr_error or 'QR-код больше недействителен.' }}</div></div></div>
+      <div class="panel-actions">
+        <form action="/telethon/qr" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn primary" type="submit">Создать новый QR</button></form>
+        <form action="/telethon/cancel" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Вернуться к способам входа</button></form>
+      </div>
+
     {% elif auth_step == 'code' %}
-      <div class="panel-head"><div><h2>3. Код Telegram</h2><div class="subtle">Telegram отправил код в приложение или другим доступным способом. Код используется только для этого запроса.</div></div></div>
-      <form action="/telethon/code" method="post" class="form-grid" autocomplete="off">
+      <div class="panel-head"><div><h2>3. Введите код Telegram</h2><div class="subtle">Telegram уже ответил, каким способом он пытается доставить код. Проверьте информацию ниже.</div></div></div>
+
+      {% set ci = auth_info.code_info or {} %}
+      <div class="delivery-card">
+        <div class="delivery-row"><span>Способ доставки</span><strong>{{ ci.delivery or 'неизвестно' }}</strong></div>
+        {% if ci.length %}<div class="delivery-row"><span>Длина кода</span><strong>{{ ci.length }} знаков</strong></div>{% endif %}
+        {% if ci.next_delivery %}<div class="delivery-row"><span>Следующий вариант</span><strong>{{ ci.next_delivery }}</strong></div>{% endif %}
+        {% if auth_info.resend_wait_seconds %}<div class="delivery-row"><span>Повторная отправка</span><strong>примерно через {{ auth_info.resend_wait_seconds }} сек.</strong></div>{% endif %}
+        <p>{{ ci.hint or 'Проверьте активные Telegram-сессии. Если код не приходит, используйте QR-вход.' }}</p>
+      </div>
+
+      <form action="/telethon/code" method="post" class="form-grid section-gap" autocomplete="off">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label class="wide">Код<input class="input code-input" inputmode="numeric" name="code" required autocomplete="one-time-code" placeholder="12345"></label>
         <div class="wide panel-actions"><button class="btn primary" type="submit">Подтвердить код</button></div>
       </form>
-      <form action="/telethon/cancel" method="post" style="margin-top:12px">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="btn ghost" type="submit">Запросить код заново</button>
-      </form>
+
+      <div class="panel-actions section-gap">
+        <form action="/telethon/resend" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Повторить доступным способом</button></form>
+        <form action="/telethon/qr" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn" type="submit">Войти через QR вместо кода</button></form>
+        <form action="/telethon/cancel" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn ghost" type="submit">Начать заново</button></form>
+      </div>
 
     {% elif auth_step == 'password' %}
-      <div class="panel-head"><div><h2>4. Пароль двухэтапной аутентификации</h2><div class="subtle">Пароль передаётся Telethon только для входа и нигде не сохраняется.</div></div></div>
+      <div class="panel-head"><div><h2>4. Пароль двухэтапной аутентификации</h2><div class="subtle">Telegram подтвердил аккаунт и запрашивает 2FA-пароль. Он используется только для входа и нигде не сохраняется.</div></div></div>
       <form action="/telethon/password" method="post" class="form-grid" autocomplete="off">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label class="wide">2FA пароль<input class="input" type="password" name="password" required autocomplete="current-password"></label>
@@ -110,10 +166,37 @@
       <div><span>Авторизация</span><strong>{{ 'готова' if telethon.authorized else 'нет' }}</strong></div>
     </div>
     <div class="notice-box">
+      <b>Почему лучше QR</b>
+      <p>Telegram сам выбирает канал доставки кода. Для сторонних приложений некоторые SMS-сценарии недоступны, а на cloud-IP код может не появиться даже после успешного запроса.</p>
+      <p>QR-вход подтверждается с уже авторизованного Telegram-устройства и не зависит от SMS.</p>
+    </div>
+    <div class="notice-box" style="margin-top:12px">
       <b>Безопасность</b>
-      <p><code>StringSession</code> даёт доступ к Telegram-аккаунту. Интерфейс её не показывает; она хранится только в защищённом persistent storage либо в <code>SESSION_STRING</code> Bothost.</p>
-      <p style="margin-bottom:0">Телефон, код и 2FA-пароль этим интерфейсом не сохраняются.</p>
+      <p><code>StringSession</code> даёт доступ к Telegram-аккаунту. Интерфейс её не показывает.</p>
+      <p style="margin-bottom:0">Телефон, одноразовый код, QR-token и 2FA-пароль не сохраняются в БД.</p>
     </div>
   </aside>
 </div>
+
+{% if auth_step == 'qr' %}
+<script>
+(function () {
+  let attempts = 0;
+  const poll = async () => {
+    attempts += 1;
+    try {
+      const r = await fetch('/telethon/qr/status', {credentials: 'same-origin', cache: 'no-store'});
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.authorized || ['done','password','qr_expired','qr_error'].includes(data.step)) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {}
+    if (attempts < 90) setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 1800);
+})();
+</script>
+{% endif %}
 {% endblock %}

@@ -465,8 +465,30 @@ async def bot_settings_save(
     return redirect("/bot", "Настройки бота сохранены")
 
 
+def _qr_svg_data_uri(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        import qrcode
+        import qrcode.image.svg
+
+        image = qrcode.make(
+            url,
+            image_factory=qrcode.image.svg.SvgPathFillImage,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            border=3,
+        )
+        raw = image.to_string()
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        return "data:image/svg+xml;base64," + base64.b64encode(raw).decode("ascii")
+    except Exception:
+        return None
+
+
 def _telethon_page_response(request: Request, *, msg: str | None = None, error: str | None = None):
     status_info = telethon_status()
+    auth_info = telethon_auth.public_state()
     step = telethon_auth.step
     if status_info["authorized"]:
         step = "done"
@@ -474,11 +496,15 @@ def _telethon_page_response(request: Request, *, msg: str | None = None, error: 
         step = "config"
     elif step == "idle":
         step = "phone"
+    qr_url = telethon_auth.qr_url if step == "qr" else None
     return render(
         request,
         "telethon.html",
         telethon=status_info,
         auth_step=step,
+        auth_info=auth_info,
+        qr_image=_qr_svg_data_uri(qr_url),
+        qr_deep_link=qr_url,
         msg=msg,
         error=error,
     )
@@ -526,6 +552,47 @@ async def telethon_check_existing(request: Request, csrf: str = Form(...)):
     return redirect("/telethon", "StringSession отсутствует или больше не авторизована. Введите номер телефона.")
 
 
+@app.post("/telethon/qr", response_class=HTMLResponse)
+async def telethon_qr_start(request: Request, csrf: str = Form(...)):
+    verify_csrf(request, csrf)
+    try:
+        result = await telethon_auth.start_qr()
+    except TelethonAuthError as exc:
+        return _telethon_page_response(request, error=str(exc))
+    if result.get("authorized"):
+        audit(f"web:{WEB_USERNAME}", "telethon_authorized_existing")
+        return redirect("/telethon", "Telethon уже авторизован. Сессия готова к работе.")
+    audit(f"web:{WEB_USERNAME}", "telethon_qr_started")
+    return redirect("/telethon", "QR-код создан. Отсканируйте его в Telegram → Настройки → Устройства → Подключить устройство.")
+
+
+@app.get("/telethon/qr/status")
+async def telethon_qr_status(request: Request):
+    require_session(request)
+    status_info = telethon_status()
+    auth_info = telethon_auth.public_state()
+    step = "done" if status_info.get("authorized") else str(auth_info.get("step") or "idle")
+    return {
+        "authorized": bool(status_info.get("authorized")),
+        "step": step,
+        "qr_error": auth_info.get("qr_error") or "",
+        "resend_wait_seconds": auth_info.get("resend_wait_seconds") or 0,
+    }
+
+
+@app.post("/telethon/resend", response_class=HTMLResponse)
+async def telethon_resend(request: Request, csrf: str = Form(...)):
+    verify_csrf(request, csrf)
+    try:
+        result = await telethon_auth.resend_code()
+    except TelethonAuthError as exc:
+        return _telethon_page_response(request, error=str(exc))
+    info = result.get("code_info") or {}
+    delivery = info.get("delivery") or "другой доступный способ"
+    audit(f"web:{WEB_USERNAME}", "telethon_code_resent", details={"delivery": delivery})
+    return redirect("/telethon", f"Telegram повторно отправил код: {delivery}.")
+
+
 @app.post("/telethon/phone", response_class=HTMLResponse)
 async def telethon_phone(request: Request, csrf: str = Form(...), phone: str = Form(...)):
     verify_csrf(request, csrf)
@@ -536,8 +603,10 @@ async def telethon_phone(request: Request, csrf: str = Form(...), phone: str = F
     if result.get("authorized"):
         audit(f"web:{WEB_USERNAME}", "telethon_authorized_existing")
         return redirect("/telethon", "Telethon уже был авторизован. Сессия готова к работе.")
-    audit(f"web:{WEB_USERNAME}", "telethon_code_requested")
-    return redirect("/telethon", "Код отправлен Telegram. Введите его ниже.")
+    info = result.get("code_info") or {}
+    delivery = info.get("delivery") or "выбранный Telegram способ"
+    audit(f"web:{WEB_USERNAME}", "telethon_code_requested", details={"delivery": delivery})
+    return redirect("/telethon", f"Telegram принял запрос. Способ доставки: {delivery}.")
 
 
 @app.post("/telethon/code", response_class=HTMLResponse)

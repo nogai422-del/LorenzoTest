@@ -10,3 +10,7 @@ __pycache__/
 .gitignore
 *.zip
 *.rar
+*.db
+/settings.json
+.telethon_config.json
+.web_secret_key
