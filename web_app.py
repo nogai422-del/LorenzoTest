@@ -262,6 +262,14 @@ async def logout(request: Request, csrf: str = Form(...)):
     return response
 
 
+@app.get("/admin", include_in_schema=False)
+async def admin_alias(request: Request):
+    # Friendly alias: some admins naturally try /admin in a browser.
+    if not _read_session(request):
+        return redirect("/login")
+    return redirect("/")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, chat_id: int | None = None, msg: str | None = None):
     require_session(request)
@@ -576,5 +584,17 @@ async def telethon_cancel(request: Request, csrf: str = Form(...)):
 
 
 @app.get("/health")
-async def health():
-    return {"ok": True, "time": int(time.time())}
+async def health(request: Request):
+    # No secrets here. This endpoint is intentionally public so Bothost and the
+    # owner can see whether the HTTP server, Bot API polling and Telethon runtime
+    # have actually started.
+    return {
+        "ok": True,
+        "time": int(time.time()),
+        "runtime": {
+            "bot": getattr(request.app.state, "bot_status", "not_started"),
+            "bot_error": getattr(request.app.state, "bot_error", ""),
+            "telethon": getattr(request.app.state, "telethon_status", "not_started"),
+            "telethon_error": getattr(request.app.state, "telethon_error", ""),
+        },
+    }
