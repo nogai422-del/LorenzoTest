@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход — Lorenzo Admin</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='admin.css') }}">
+</head>
+<body class="login-page">
+  <section class="card login-card">
+    <div class="brand" style="margin:0 0 18px"><span class="brand-mark">L</span><span>Lorenzo Admin</span></div>
+    <h1>Панель статистики</h1>
+    <div class="subtle">Участники, активность, синхронизация Telethon и настройки уведомлений.</div>
+    {% if error %}<div class="error" style="margin-top:16px">{{ error }}</div>{% endif %}
+    {% if not configured %}<div class="error" style="margin-top:16px">Задайте <code>WEB_ADMIN_PASSWORD</code> в файле <code>.env</code>.</div>{% endif %}
+    <form method="post" action="/login">
+      <label>Логин<input class="input" name="username" autocomplete="username" required></label>
+      <label>Пароль<input class="input" type="password" name="password" autocomplete="current-password" required></label>
+      <button class="btn primary" type="submit">Войти</button>
+    </form>
+  </section>
+</body>
+</html>

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Чаты — Lorenzo Admin{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>Чаты</h1><div class="subtle">В список попадают только Telegram group/supergroup. Личные аккаунты и broadcast-каналы отфильтрованы.</div></div></div>
+{% if msg %}<div class="message">{{ msg }}</div>{% endif %}
+<section class="panel">
+  {% if not chats %}<div class="empty">Telethon ещё не обнаружил доступные группы.</div>{% endif %}
+  {% for chat in chats %}
+  <div class="chat-row">
+    <div>
+      <div class="chat-title">{{ chat.title or chat.username or chat.chat_id }}</div>
+      <div class="muted small">ID {{ chat.chat_id }} · {{ chat.chat_type }} · участников: {{ chat.participant_count or 0 }} · синхр.: {{ chat.last_member_sync_at|dt }}</div>
+      {% if chat.sync_error %}<div class="error small" style="margin-top:8px">{{ chat.sync_error }}</div>{% endif %}
+      {% if chat.is_tracked %}
+      {% set st = namespace(v=None) %}
+      <form class="form-grid" action="/chats/{{ chat.chat_id }}/settings" method="post" style="margin-top:14px;max-width:700px">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        {% set settings = none %}
+        <label>Неактивность, дней<input class="input" type="number" name="inactivity_days" min="1" value="{{ chat.settings.inactivity_days }}"></label>
+        <label>Мин. сообщений за период<input class="input" type="number" name="min_message_count" min="0" value="{{ chat.settings.min_message_count }}"></label>
+        <label>Повтор алерта, часов<input class="input" type="number" name="repeat_alert_hours" min="1" value="{{ chat.settings.repeat_alert_hours }}"></label>
+        <label>Проверка, минут<input class="input" type="number" name="check_interval_minutes" min="1" value="{{ chat.settings.check_interval_minutes }}"></label>
+        <label class="checkline wide"><input type="checkbox" name="alerts_enabled" value="1" {% if chat.alerts_enabled %}checked{% endif %}> Оповещения о неактивности включены</label>
+        <div class="wide"><button class="btn" type="submit">Сохранить правила активности</button></div>
+      </form>
+      {% endif %}
+    </div>
+    <div class="toolbar" style="align-self:start;justify-content:flex-end">
+      <form action="/chats/{{ chat.chat_id }}/track" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="enabled" value="{{ 0 if chat.is_tracked else 1 }}">
+        <button class="btn {% if chat.is_tracked %}danger{% else %}primary{% endif %}" type="submit">{% if chat.is_tracked %}Не отслеживать{% else %}Отслеживать{% endif %}</button>
+      </form>
+      {% if chat.is_tracked %}
+      <form action="/chats/{{ chat.chat_id }}/sync" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn" type="submit">🔄 Синхронизировать</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}

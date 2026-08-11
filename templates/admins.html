@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Администраторы — Lorenzo Admin{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>Администраторы</h1><div class="subtle">Эти пользователи получают доступ к Telegram-админке. Получателей уведомлений можно включать независимо.</div></div></div>
+{% if msg %}<div class="message">{{ msg }}</div>{% endif %}
+<div class="grid-2">
+<section class="panel">
+  <h2>Текущие администраторы</h2>
+  <div class="table-wrap">
+  <table><thead><tr><th>Пользователь</th><th>Роль</th><th>Оповещения</th><th></th></tr></thead><tbody>
+  {% for a in admins %}
+  <tr>
+    <td><strong>{{ a.display_name or a.user_id }}</strong><div class="muted small">{{ a.username|tguser }} · {{ a.user_id }}</div></td>
+    <td>{% if a.is_owner %}<span class="badge warn">Owner</span>{% else %}<span class="badge">Admin</span>{% endif %}</td>
+    <td>
+      <form action="/admins/{{ a.user_id }}/notifications" method="post" class="inline-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="enabled" value="{{ 0 if a.notifications_enabled else 1 }}">
+        <button class="btn" type="submit">{% if a.notifications_enabled %}🔔 Включены{% else %}🔕 Выключены{% endif %}</button>
+      </form>
+    </td>
+    <td>{% if not a.is_owner %}<form action="/admins/{{ a.user_id }}/remove" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn danger" type="submit">Удалить</button></form>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody></table>
+  </div>
+</section>
+<section class="panel">
+  <h2>Назначить администратора</h2>
+  <form action="/admins/add" method="post" class="form-grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="wide">Telegram user ID<input class="input" type="number" name="user_id" required></label>
+    <label>Имя<input class="input" name="display_name" placeholder="Необязательно"></label>
+    <label>Username<input class="input" name="username" placeholder="@username"></label>
+    <div class="wide"><button class="btn primary" type="submit">Добавить</button></div>
+  </form>
+  <p class="muted small">После назначения пользователь сможет открыть <code>/admin</code>. Обычным пользователям админ-команды не публикуются.</p>
+</section>
+</div>
+{% endblock %}

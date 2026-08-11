@@ -1,0 +1,580 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import time
+from datetime import datetime
+from urllib.parse import quote
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, Form, HTTPException, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from db import (
+    activity_series,
+    bootstrap_admins,
+    add_system_admin,
+    audit,
+    dashboard_stats,
+    get_chat_info,
+    init_db,
+    get_chat_settings,
+    list_known_chats,
+    list_inactive_members_for_web,
+    list_members_for_web,
+    list_system_admins,
+    remove_system_admin,
+    request_sync,
+    set_admin_notifications,
+    set_chat_settings,
+    set_chat_tracked,
+)
+from settings_store import load_settings, save_settings
+from telethon_auth import TelethonAuthError, TelethonAuthManager
+from telethon_config import load_telethon_config, telethon_status
+from runtime_paths import load_or_create_web_secret, web_public_url
+
+load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OWNER_ID_ENV = (os.getenv("OWNER_ID") or "").strip()
+WEB_USERNAME = os.getenv("WEB_ADMIN_USERNAME", "admin")
+WEB_PASSWORD = os.getenv("WEB_ADMIN_PASSWORD", "")
+WEB_SECRET = load_or_create_web_secret()
+_PUBLIC_URL = web_public_url()
+_cookie_raw = os.getenv("WEB_COOKIE_SECURE")
+WEB_COOKIE_SECURE = (
+    _cookie_raw.strip().lower() in {"1", "true", "yes", "on"}
+    if _cookie_raw is not None
+    else _PUBLIC_URL.startswith("https://")
+)
+SESSION_TTL = max(900, int(os.getenv("WEB_SESSION_TTL_SECONDS", str(12 * 3600))))
+COOKIE_NAME = "lorenzo_admin_session"
+LOGIN_WINDOW_SECONDS = 15 * 60
+LOGIN_MAX_FAILURES = 10
+_LOGIN_FAILURES: dict[str, list[int]] = {}
+
+
+def _request_ip(request: Request) -> str:
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded:
+        return forwarded[:80]
+    return (request.client.host if request.client else "unknown")[:80]
+
+
+def _login_is_blocked(request: Request) -> bool:
+    now = int(time.time())
+    key = _request_ip(request)
+    recent = [ts for ts in _LOGIN_FAILURES.get(key, []) if now - ts < LOGIN_WINDOW_SECONDS]
+    if recent:
+        _LOGIN_FAILURES[key] = recent
+    else:
+        _LOGIN_FAILURES.pop(key, None)
+    return len(recent) >= LOGIN_MAX_FAILURES
+
+
+def _record_login_failure(request: Request) -> None:
+    key = _request_ip(request)
+    _LOGIN_FAILURES.setdefault(key, []).append(int(time.time()))
+
+
+def _clear_login_failures(request: Request) -> None:
+    _LOGIN_FAILURES.pop(_request_ip(request), None)
+
+
+app = FastAPI(title="Lorenzo Admin", docs_url=None, redoc_url=None)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if not request.url.path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    if WEB_COOKIE_SECURE:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
+app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+init_db()
+_existing_admins = list_system_admins()
+if OWNER_ID_ENV:
+    OWNER_ID = int(OWNER_ID_ENV)
+    bootstrap_admins(OWNER_ID, [])
+else:
+    _owners = [int(row["user_id"]) for row in _existing_admins if int(row["is_owner"])]
+    if not _owners:
+        raise RuntimeError("OWNER_ID not found. Add OWNER_ID=... to .env for the first start")
+    OWNER_ID = _owners[0]
+
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+telethon_auth = TelethonAuthManager()
+
+
+def fmt_ts(value) -> str:
+    try:
+        if not value:
+            return "—"
+        return datetime.fromtimestamp(int(value)).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return "—"
+
+
+def fmt_username(value) -> str:
+    return f"@{value}" if value else "—"
+
+
+templates.env.filters["dt"] = fmt_ts
+templates.env.filters["tguser"] = fmt_username
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _unb64(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _sign(data: str) -> str:
+    return hmac.new(WEB_SECRET.encode(), data.encode(), hashlib.sha256).hexdigest()
+
+
+def _new_session(username: str) -> str:
+    payload = {
+        "u": username,
+        "exp": int(time.time()) + SESSION_TTL,
+        "csrf": secrets.token_urlsafe(24),
+    }
+    body = _b64(json.dumps(payload, separators=(",", ":")).encode())
+    return f"{body}.{_sign(body)}"
+
+
+def _read_session(request: Request) -> dict | None:
+    raw = request.cookies.get(COOKIE_NAME)
+    if not raw or "." not in raw:
+        return None
+    body, signature = raw.rsplit(".", 1)
+    if not hmac.compare_digest(signature, _sign(body)):
+        return None
+    try:
+        payload = json.loads(_unb64(body))
+    except Exception:
+        return None
+    if payload.get("u") != WEB_USERNAME or int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    return payload
+
+
+def require_session(request: Request) -> dict:
+    session = _read_session(request)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    return session
+
+
+def verify_csrf(request: Request, csrf: str) -> dict:
+    session = require_session(request)
+    if not csrf or not hmac.compare_digest(str(session.get("csrf", "")), str(csrf)):
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
+    return session
+
+
+def render(request: Request, name: str, **context):
+    session = _read_session(request)
+    context.update(
+        {
+            "request": request,
+            "session": session,
+            "csrf": session.get("csrf") if session else "",
+            "owner_id": OWNER_ID,
+            "web_username": WEB_USERNAME,
+            "web_cookie_secure": WEB_COOKIE_SECURE,
+        }
+    )
+    return templates.TemplateResponse(request=request, name=name, context=context)
+
+
+def redirect(path: str, message: str | None = None) -> RedirectResponse:
+    if message:
+        sep = "&" if "?" in path else "?"
+        path = f"{path}{sep}msg={quote(message)}"
+    return RedirectResponse(path, status_code=303)
+
+
+@app.exception_handler(HTTPException)
+async def auth_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code == 401:
+        return redirect("/login")
+    return render(request, "error.html", code=exc.status_code, message=exc.detail)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    if _read_session(request):
+        return redirect("/")
+    return render(request, "login.html", configured=bool(WEB_PASSWORD), error=None)
+
+
+@app.post("/login", response_class=HTMLResponse)
+async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
+    if not WEB_PASSWORD:
+        return render(request, "login.html", configured=False, error="WEB_ADMIN_PASSWORD не задан в окружении")
+    if _login_is_blocked(request):
+        audit(f"web:{username[:80]}", "login_rate_limited", details={"ip": _request_ip(request)})
+        return render(request, "login.html", configured=True, error="Слишком много неудачных попыток. Повторите позже.")
+    valid_user = hmac.compare_digest(username.strip(), WEB_USERNAME)
+    valid_password = hmac.compare_digest(password, WEB_PASSWORD)
+    if not (valid_user and valid_password):
+        _record_login_failure(request)
+        audit(f"web:{username[:80]}", "login_failed", details={"ip": _request_ip(request)})
+        return render(request, "login.html", configured=True, error="Неверный логин или пароль")
+    _clear_login_failures(request)
+    response = redirect("/")
+    response.set_cookie(
+        COOKIE_NAME,
+        _new_session(WEB_USERNAME),
+        httponly=True,
+        secure=WEB_COOKIE_SECURE,
+        samesite="lax",
+        max_age=SESSION_TTL,
+        path="/",
+    )
+    audit(f"web:{WEB_USERNAME}", "login")
+    return response
+
+
+@app.post("/logout")
+async def logout(request: Request, csrf: str = Form(...)):
+    verify_csrf(request, csrf)
+    response = redirect("/login")
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return response
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request, chat_id: int | None = None, msg: str | None = None):
+    require_session(request)
+    chats = list_known_chats(include_untracked=False)
+    selected = get_chat_info(chat_id) if chat_id is not None else None
+    stats = dashboard_stats(chat_id)
+    series = activity_series(chat_id, days=30)
+    max_messages = max([row["messages"] for row in series] + [1])
+    return render(
+        request,
+        "dashboard.html",
+        chats=chats,
+        selected=selected,
+        selected_chat_id=chat_id,
+        stats=stats,
+        series=series,
+        max_messages=max_messages,
+        msg=msg,
+    )
+
+
+@app.get("/chats", response_class=HTMLResponse)
+async def chats_page(request: Request, msg: str | None = None):
+    require_session(request)
+    rows = []
+    for row in list_known_chats(include_untracked=True):
+        item = dict(row)
+        item["settings"] = get_chat_settings(int(row["chat_id"])) if int(row["is_tracked"] or 0) else None
+        rows.append(item)
+    return render(request, "chats.html", chats=rows, msg=msg)
+
+
+@app.post("/chats/{chat_id}/track")
+async def chat_track(request: Request, chat_id: int, csrf: str = Form(...), enabled: int = Form(...)):
+    verify_csrf(request, csrf)
+    if not set_chat_tracked(chat_id, bool(enabled)):
+        raise HTTPException(status_code=400, detail="Можно отслеживать только group/supergroup")
+    audit(f"web:{WEB_USERNAME}", "chat_tracking", str(chat_id), {"enabled": bool(enabled)})
+    if enabled:
+        request_sync(chat_id, f"web:{WEB_USERNAME}", "full")
+    return redirect("/chats", "Настройки отслеживания сохранены")
+
+
+@app.post("/chats/{chat_id}/sync")
+async def chat_sync(request: Request, chat_id: int, csrf: str = Form(...)):
+    verify_csrf(request, csrf)
+    info = get_chat_info(chat_id)
+    if not info or info.get("chat_type") not in {"group", "supergroup"}:
+        raise HTTPException(status_code=400, detail="Некорректный чат")
+    request_sync(chat_id, f"web:{WEB_USERNAME}", "full")
+    audit(f"web:{WEB_USERNAME}", "sync_requested", str(chat_id))
+    return redirect("/chats", "Синхронизация поставлена в очередь")
+
+
+@app.post("/chats/{chat_id}/settings")
+async def chat_settings_submit(
+    request: Request,
+    chat_id: int,
+    csrf: str = Form(...),
+    inactivity_days: int = Form(...),
+    min_message_count: int = Form(...),
+    repeat_alert_hours: int = Form(...),
+    check_interval_minutes: int = Form(...),
+    alerts_enabled: int = Form(0),
+):
+    verify_csrf(request, csrf)
+    info = get_chat_info(chat_id)
+    if not info or info.get("chat_type") not in {"group", "supergroup"}:
+        raise HTTPException(status_code=400, detail="Некорректный чат")
+    set_chat_settings(
+        chat_id,
+        inactivity_days=inactivity_days,
+        min_message_count=min_message_count,
+        repeat_alert_hours=repeat_alert_hours,
+        check_interval_minutes=check_interval_minutes,
+        enabled=bool(alerts_enabled),
+    )
+    audit(f"web:{WEB_USERNAME}", "chat_settings", str(chat_id))
+    return redirect("/chats", "Настройки активности сохранены")
+
+
+@app.get("/members", response_class=HTMLResponse)
+async def members_page(
+    request: Request,
+    chat_id: int | None = None,
+    q: str = "",
+    state: str = "active",
+    msg: str | None = None,
+):
+    require_session(request)
+    chats = list_known_chats(include_untracked=False)
+    if chat_id is None and chats:
+        chat_id = int(chats[0]["chat_id"])
+    if chat_id is None:
+        members = []
+    elif state == "inactive":
+        members = list_inactive_members_for_web(chat_id, limit=300)
+        if q.strip():
+            ql = q.strip().lower()
+            members = [m for m in members if ql in str(m["user_id"]).lower() or ql in str(m["user_name"] or "").lower() or ql in str(m["username"] or "").lower()]
+    else:
+        members = list_members_for_web(chat_id, search=q, active=state, limit=300)
+    return render(
+        request,
+        "members.html",
+        chats=chats,
+        chat_id=chat_id,
+        members=members,
+        q=q,
+        state=state,
+        msg=msg,
+    )
+
+
+@app.get("/admins", response_class=HTMLResponse)
+async def admins_page(request: Request, msg: str | None = None):
+    require_session(request)
+    return render(request, "admins.html", admins=list_system_admins(), msg=msg)
+
+
+@app.post("/admins/add")
+async def admins_add(
+    request: Request,
+    csrf: str = Form(...),
+    user_id: int = Form(...),
+    display_name: str = Form(""),
+    username: str = Form(""),
+):
+    verify_csrf(request, csrf)
+    add_system_admin(
+        user_id,
+        display_name=display_name.strip() or None,
+        username=username.strip().lstrip("@") or None,
+    )
+    audit(f"web:{WEB_USERNAME}", "admin_added", str(user_id))
+    return redirect("/admins", "Администратор добавлен")
+
+
+@app.post("/admins/{user_id}/remove")
+async def admins_remove(request: Request, user_id: int, csrf: str = Form(...)):
+    verify_csrf(request, csrf)
+    if not remove_system_admin(user_id):
+        raise HTTPException(status_code=400, detail="Владельца удалить нельзя")
+    audit(f"web:{WEB_USERNAME}", "admin_removed", str(user_id))
+    return redirect("/admins", "Администратор удалён")
+
+
+@app.post("/admins/{user_id}/notifications")
+async def admins_notifications(request: Request, user_id: int, csrf: str = Form(...), enabled: int = Form(...)):
+    verify_csrf(request, csrf)
+    if not set_admin_notifications(user_id, bool(enabled)):
+        raise HTTPException(status_code=404, detail="Администратор не найден")
+    audit(f"web:{WEB_USERNAME}", "admin_notifications", str(user_id), {"enabled": bool(enabled)})
+    return redirect("/admins", "Оповещения обновлены")
+
+
+@app.get("/bot", response_class=HTMLResponse)
+async def bot_settings_page(request: Request, msg: str | None = None):
+    require_session(request)
+    return render(request, "bot_settings.html", settings=load_settings(OWNER_ID), msg=msg)
+
+
+@app.post("/bot")
+async def bot_settings_save(
+    request: Request,
+    csrf: str = Form(...),
+    is_active: int = Form(0),
+    level: int = Form(...),
+    work_start: str = Form(...),
+    work_end: str = Form(...),
+    reply_delay: int = Form(...),
+    welcome_text: str = Form(...),
+    consent_text: str = Form(...),
+):
+    verify_csrf(request, csrf)
+    current = load_settings(OWNER_ID)
+    current.update(
+        {
+            "is_active": bool(is_active),
+            "level": level,
+            "work_start": work_start.strip(),
+            "work_end": work_end.strip(),
+            "reply_delay": reply_delay,
+            "texts": {
+                "welcome_text": welcome_text,
+                "consent_text": consent_text,
+            },
+        }
+    )
+    save_settings(current, OWNER_ID)
+    audit(f"web:{WEB_USERNAME}", "bot_settings")
+    return redirect("/bot", "Настройки бота сохранены")
+
+
+def _telethon_page_response(request: Request, *, msg: str | None = None, error: str | None = None):
+    status_info = telethon_status()
+    step = telethon_auth.step
+    if status_info["authorized"]:
+        step = "done"
+    elif not status_info["configured"]:
+        step = "config"
+    elif step == "idle":
+        step = "phone"
+    return render(
+        request,
+        "telethon.html",
+        telethon=status_info,
+        auth_step=step,
+        msg=msg,
+        error=error,
+    )
+
+
+@app.get("/telethon", response_class=HTMLResponse)
+async def telethon_page(request: Request, msg: str | None = None):
+    require_session(request)
+    return _telethon_page_response(request, msg=msg)
+
+
+@app.post("/telethon/configure", response_class=HTMLResponse)
+async def telethon_configure(
+    request: Request,
+    csrf: str = Form(...),
+    api_id: str = Form(...),
+    api_hash: str = Form(""),
+):
+    verify_csrf(request, csrf)
+    current = load_telethon_config()
+    if telethon_status()["authorized"]:
+        return _telethon_page_response(request, error="Telethon уже авторизован. Для обычной работы менять API-данные не требуется.")
+    try:
+        parsed_api_id = int(api_id.strip())
+        selected_hash = api_hash.strip() or str(current.get("api_hash") or "")
+        if not selected_hash:
+            raise TelethonAuthError("Введите API Hash.")
+        await telethon_auth.configure(parsed_api_id, selected_hash)
+    except (ValueError, TelethonAuthError) as exc:
+        return _telethon_page_response(request, error=str(exc))
+    audit(f"web:{WEB_USERNAME}", "telethon_configured")
+    return redirect("/telethon", "API-данные сохранены. Теперь введите номер Telegram.")
+
+
+@app.post("/telethon/check", response_class=HTMLResponse)
+async def telethon_check_existing(request: Request, csrf: str = Form(...)):
+    verify_csrf(request, csrf)
+    try:
+        result = await telethon_auth.check_existing()
+    except TelethonAuthError as exc:
+        return _telethon_page_response(request, error=str(exc))
+    if result.get("authorized"):
+        audit(f"web:{WEB_USERNAME}", "telethon_existing_session_verified")
+        return redirect("/telethon", "Существующая StringSession подтверждена и готова к работе.")
+    return redirect("/telethon", "StringSession отсутствует или больше не авторизована. Введите номер телефона.")
+
+
+@app.post("/telethon/phone", response_class=HTMLResponse)
+async def telethon_phone(request: Request, csrf: str = Form(...), phone: str = Form(...)):
+    verify_csrf(request, csrf)
+    try:
+        result = await telethon_auth.send_code(phone)
+    except TelethonAuthError as exc:
+        return _telethon_page_response(request, error=str(exc))
+    if result.get("authorized"):
+        audit(f"web:{WEB_USERNAME}", "telethon_authorized_existing")
+        return redirect("/telethon", "Telethon уже был авторизован. Сессия готова к работе.")
+    audit(f"web:{WEB_USERNAME}", "telethon_code_requested")
+    return redirect("/telethon", "Код отправлен Telegram. Введите его ниже.")
+
+
+@app.post("/telethon/code", response_class=HTMLResponse)
+async def telethon_code(request: Request, csrf: str = Form(...), code: str = Form(...)):
+    verify_csrf(request, csrf)
+    try:
+        result = await telethon_auth.submit_code(code)
+    except TelethonAuthError as exc:
+        return _telethon_page_response(request, error=str(exc))
+    if result.get("step") == "password":
+        return redirect("/telethon", "Для аккаунта включена двухэтапная аутентификация. Введите пароль.")
+    audit(f"web:{WEB_USERNAME}", "telethon_authorized")
+    return redirect("/telethon", "Telethon успешно подключён.")
+
+
+@app.post("/telethon/password", response_class=HTMLResponse)
+async def telethon_password(request: Request, csrf: str = Form(...), password: str = Form(...)):
+    verify_csrf(request, csrf)
+    try:
+        await telethon_auth.submit_password(password)
+    except TelethonAuthError as exc:
+        return _telethon_page_response(request, error=str(exc))
+    audit(f"web:{WEB_USERNAME}", "telethon_authorized_2fa")
+    return redirect("/telethon", "Telethon успешно подключён с 2FA.")
+
+
+@app.post("/telethon/enabled")
+async def telethon_enabled(request: Request, csrf: str = Form(...), enabled: int = Form(...)):
+    verify_csrf(request, csrf)
+    status_info = telethon_status()
+    if bool(enabled) and not status_info["authorized"]:
+        return _telethon_page_response(request, error="Сначала завершите авторизацию Telethon.")
+    from telethon_config import save_telethon_config
+    save_telethon_config(enabled=bool(enabled))
+    audit(f"web:{WEB_USERNAME}", "telethon_enabled", details={"enabled": bool(enabled)})
+    return redirect("/telethon", "Синхронизация Telethon включена." if enabled else "Синхронизация Telethon остановлена.")
+
+
+@app.post("/telethon/cancel")
+async def telethon_cancel(request: Request, csrf: str = Form(...)):
+    verify_csrf(request, csrf)
+    await telethon_auth.reset(clear_pending=True)
+    audit(f"web:{WEB_USERNAME}", "telethon_setup_cancelled")
+    return redirect("/telethon", "Мастер авторизации сброшен. Можно запросить новый код.")
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True, "time": int(time.time())}

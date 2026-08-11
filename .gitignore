@@ -1,0 +1,21 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+bot.log
+*.log
+*.session
+*.session-journal
+*.db-wal
+*.db-shm
+*.db-journal
+.telethon_config.json
+.web_secret_key
+
+# Bothost persistent runtime storage. Do not commit it.
+data/
+
+# Runtime state/production database should not be committed to Git.
+*.db
+/settings.json

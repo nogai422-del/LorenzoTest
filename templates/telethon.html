@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Telethon — Lorenzo Admin{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>Подключение Telethon</h1>
+    <div class="subtle">Мастер авторизации личного Telegram-аккаунта для синхронизации групп, участников и активности.</div>
+  </div>
+  <span class="badge {{ telethon.status_kind }}">{{ telethon.status_label }}</span>
+</div>
+{% if msg %}<div class="message">{{ msg }}</div>{% endif %}
+{% if error %}<div class="error" style="margin-bottom:18px">{{ error }}</div>{% endif %}
+
+<div class="setup-steps">
+  <div class="setup-step {% if telethon.configured %}done{% elif auth_step == 'config' %}current{% endif %}"><b>1</b><span>API данные</span></div>
+  <div class="setup-step {% if auth_step in ['code','password','done'] %}done{% elif auth_step == 'phone' %}current{% endif %}"><b>2</b><span>Телефон</span></div>
+  <div class="setup-step {% if auth_step in ['password','done'] %}done{% elif auth_step == 'code' %}current{% endif %}"><b>3</b><span>Код</span></div>
+  <div class="setup-step {% if auth_step == 'done' %}done{% elif auth_step == 'password' %}current{% endif %}"><b>4</b><span>2FA</span></div>
+</div>
+
+<div class="grid-2">
+  <section class="panel">
+    {% if auth_step == 'done' %}
+      <h2>✅ Telethon подключён</h2>
+      {% set account = telethon.account %}
+      <div class="detail-list">
+        <div><span>Аккаунт</span><strong>{{ account.display_name or 'Telegram account' }}</strong></div>
+        <div><span>Username</span><strong>{% if account.username %}@{{ account.username }}{% else %}—{% endif %}</strong></div>
+        <div><span>User ID</span><strong>{{ account.id or '—' }}</strong></div>
+        <div><span>Сессия</span><strong>StringSession</strong></div>
+      </div>
+      <p class="muted">Worker подхватит StringSession автоматически и начнёт обнаружение групп. На Bothost она переживает обновления приложения.</p>
+      <form action="/telethon/enabled" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="enabled" value="{{ 0 if telethon.enabled else 1 }}">
+        <button class="btn {% if telethon.enabled %}danger{% else %}primary{% endif %}" type="submit">{% if telethon.enabled %}Остановить синхронизацию{% else %}Включить синхронизацию{% endif %}</button>
+      </form>
+
+    {% elif auth_step == 'config' %}
+      <h2>1. API ID и API Hash</h2>
+      <p class="muted">Эти два значения выдаются Telegram в разделе API development tools. Они сохраняются только локально на сервере.</p>
+      <form action="/telethon/configure" method="post" class="form-grid" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>API ID<input class="input" inputmode="numeric" name="api_id" required placeholder="12345678" value="{{ telethon.api_id or '' }}"></label>
+        <label>API Hash<input class="input" type="password" name="api_hash" required placeholder="Введите API Hash" autocomplete="new-password"></label>
+        <div class="wide"><button class="btn primary" type="submit">Сохранить и продолжить</button></div>
+      </form>
+
+    {% elif auth_step == 'phone' %}
+      <h2>2. Номер Telegram</h2>
+      <p class="muted">Введите номер аккаунта, который состоит в нужных группах. Номер не записывается в конфиг или БД.</p>
+      {% if telethon.has_session %}
+      <form action="/telethon/check" method="post" style="margin-bottom:16px">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn" type="submit">Проверить сохранённую StringSession</button>
+      </form>
+      {% endif %}
+      <form action="/telethon/phone" method="post" class="form-grid" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="wide">Телефон с кодом страны<input class="input" type="tel" name="phone" required placeholder="+491234567890" autocomplete="tel"></label>
+        <div class="wide toolbar"><button class="btn primary" type="submit">Получить код Telegram</button></div>
+      </form>
+      <details class="advanced-box">
+        <summary>Изменить API-настройки</summary>
+        <form action="/telethon/configure" method="post" class="form-grid" autocomplete="off" style="margin-top:14px">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label>API ID<input class="input" inputmode="numeric" name="api_id" required value="{{ telethon.api_id or '' }}"></label>
+          <label>Новый API Hash<input class="input" type="password" name="api_hash" placeholder="Оставьте пустым, чтобы не менять" autocomplete="new-password"></label>
+          <div class="wide"><button class="btn" type="submit">Сохранить API-настройки</button></div>
+        </form>
+      </details>
+
+    {% elif auth_step == 'code' %}
+      <h2>3. Код Telegram</h2>
+      <p class="muted">Telegram отправил код в приложение или другим доступным способом. Код используется только для этого запроса.</p>
+      <form action="/telethon/code" method="post" class="form-grid" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="wide">Код<input class="input code-input" inputmode="numeric" name="code" required autocomplete="one-time-code" placeholder="12345"></label>
+        <div class="wide toolbar">
+          <button class="btn primary" type="submit">Подтвердить код</button>
+        </div>
+      </form>
+      <form action="/telethon/cancel" method="post" style="margin-top:12px">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn ghost" type="submit">Запросить код заново</button>
+      </form>
+
+    {% elif auth_step == 'password' %}
+      <h2>4. Пароль двухэтапной аутентификации</h2>
+      <p class="muted">У аккаунта включён Telegram 2FA. Пароль передаётся Telethon только для входа и нигде не сохраняется.</p>
+      <form action="/telethon/password" method="post" class="form-grid" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="wide">2FA пароль<input class="input" type="password" name="password" required autocomplete="current-password"></label>
+        <div class="wide"><button class="btn primary" type="submit">Подключить Telethon</button></div>
+      </form>
+      <form action="/telethon/cancel" method="post" style="margin-top:12px">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn ghost" type="submit">Начать авторизацию заново</button>
+      </form>
+    {% endif %}
+  </section>
+
+  <aside class="panel">
+    <h2>Состояние</h2>
+    <div class="detail-list compact">
+      <div><span>API ID</span><strong>{{ telethon.api_id or 'не задан' }}</strong></div>
+      <div><span>API Hash</span><strong>{% if telethon.api_hash_set %}сохранён{% else %}не задан{% endif %}</strong></div>
+      <div><span>StringSession</span><strong>{{ 'сохранена' if telethon.has_session else 'нет' }}</strong></div>
+      <div><span>Источник</span><strong>{% if telethon.session_source == 'environment' %}Bothost ENV{% elif telethon.session_source == 'storage' %}persistent storage{% else %}—{% endif %}</strong></div>
+      <div><span>Авторизация</span><strong>{{ 'готова' if telethon.authorized else 'нет' }}</strong></div>
+    </div>
+    <div class="notice-box">
+      <b>Безопасность</b>
+      <p><code>StringSession</code> даёт доступ к Telegram-аккаунту. Интерфейс никогда её не показывает; она хранится только в защищённом persistent storage либо в <code>SESSION_STRING</code> Bothost.</p>
+      <p style="margin-bottom:0">Телефон, код и 2FA-пароль этим интерфейсом не сохраняются.</p>
+    </div>
+  </aside>
+</div>
+{% endblock %}
