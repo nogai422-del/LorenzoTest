@@ -3,62 +3,63 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>{% block title %}Lorenzo Admin{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='admin.css') }}">
+  {% include "_styles.html" %}
 </head>
 <body>
-<div class="app-bg"></div>
 <div class="shell">
   <aside class="sidebar">
-    <div class="brand-wrap">
-      <div class="brand">
-        <span class="brand-mark">L</span>
-        <div>
-          <span class="brand-name">Lorenzo Admin</span>
-          <span class="brand-subtitle">Community Intelligence</span>
-        </div>
-      </div>
-      <div class="sidebar-status">
-        <span class="status-dot"></span>
-        <div>
-          <strong>Система запущена</strong>
-          <div class="muted small">Веб-панель, бот и синхронизация</div>
-        </div>
+    <div class="brand">
+      <span class="brand-mark">L</span>
+      <div class="brand-copy">
+        <div class="brand-name">Lorenzo Admin</div>
+        <div class="brand-subtitle">Community Intelligence</div>
       </div>
     </div>
 
+    <div class="nav-label">Workspace</div>
     <nav class="nav">
-      <div class="nav-group-label">Навигация</div>
-      <a href="/" class="{% if request.url.path == '/' %}active{% endif %}"><span class="nav-icon">📊</span><span>Обзор</span></a>
-      <a href="/chats" class="{% if request.url.path.startswith('/chats') %}active{% endif %}"><span class="nav-icon">💬</span><span>Чаты</span></a>
-      <a href="/members" class="{% if request.url.path.startswith('/members') %}active{% endif %}"><span class="nav-icon">👥</span><span>Участники</span></a>
-      <a href="/admins" class="{% if request.url.path.startswith('/admins') %}active{% endif %}"><span class="nav-icon">🛡️</span><span>Администраторы</span></a>
+      <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">
+        <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span><span>Обзор</span>
+      </a>
+      <a href="/chats" class="{% if request.url.path.startswith('/chats') %}active{% endif %}">
+        <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg></span><span>Чаты</span>
+      </a>
+      <a href="/members" class="{% if request.url.path.startswith('/members') %}active{% endif %}">
+        <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span>Участники</span>
+      </a>
+      <a href="/admins" class="{% if request.url.path.startswith('/admins') %}active{% endif %}">
+        <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg></span><span>Администраторы</span>
+      </a>
+    </nav>
 
-      <div class="nav-group-label nav-spacer">Интеграции</div>
-      <a href="/telethon" class="{% if request.url.path.startswith('/telethon') %}active{% endif %}"><span class="nav-icon">🔐</span><span>Telethon</span></a>
-      <a href="/bot" class="{% if request.url.path.startswith('/bot') %}active{% endif %}"><span class="nav-icon">⚙️</span><span>Бот</span></a>
+    <div class="nav-label">Integrations</div>
+    <nav class="nav">
+      <a href="/telethon" class="{% if request.url.path.startswith('/telethon') %}active{% endif %}">
+        <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><span>Telethon</span>
+      </a>
+      <a href="/bot" class="{% if request.url.path.startswith('/bot') %}active{% endif %}">
+        <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h-.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1a1.7 1.7 0 0 0 1.6 1.5 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.38.31.6.78.6 1.27v.33h1v4h-.1a1.7 1.7 0 0 0-1.5.4z"/></svg></span><span>Бот</span>
+      </a>
     </nav>
 
     <div class="sidebar-footer">
-      <div class="profile-card">
-        <div class="profile-avatar">{{ (web_username or 'A')[:1]|upper }}</div>
-        <div class="profile-meta">
-          <div class="profile-label">Авторизован как</div>
-          <div class="profile-name">{{ web_username }}</div>
+      <div class="account">
+        <div class="avatar">{{ (web_username or 'A')[:1]|upper }}</div>
+        <div style="min-width:0">
+          <div class="account-name">{{ web_username }}</div>
+          <div class="account-role">Web administrator</div>
         </div>
       </div>
       <form action="/logout" method="post">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="btn ghost block" type="submit">Выйти</button>
+        <button class="btn ghost block" type="submit">Выйти из панели</button>
       </form>
     </div>
   </aside>
 
-  <main class="main">
-    <div class="main-shell">
-      {% block content %}{% endblock %}
-    </div>
-  </main>
+  <main class="main"><div class="main-shell">{% block content %}{% endblock %}</div></main>
 </div>
 </body>
 </html>

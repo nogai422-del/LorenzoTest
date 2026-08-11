@@ -3,34 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Вход — Lorenzo Admin</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='admin.css') }}">
+  {% include "_styles.html" %}
 </head>
 <body class="login-page">
   <div class="login-layout">
-    <section class="login-showcase panel">
-      <span class="eyebrow">Professional admin panel</span>
-      <div class="brand brand-large" style="margin:0 0 22px"><span class="brand-mark">L</span><div><span class="brand-name">Lorenzo Admin</span><span class="brand-subtitle">Community Intelligence</span></div></div>
-      <h1>Современная панель управления Telegram-сообществом</h1>
-      <div class="subtle">Метрики, участники, Telethon-синхронизация, уведомления и управление ролями — в едином профессиональном интерфейсе.</div>
+    <section class="panel login-showcase">
+      <div class="brand" style="padding:0 0 28px">
+        <span class="brand-mark">L</span>
+        <div class="brand-copy"><div class="brand-name">Lorenzo Admin</div><div class="brand-subtitle">Community Intelligence</div></div>
+      </div>
+      <span class="eyebrow">Telegram community operations</span>
+      <h1>Управляй активностью сообщества из одной панели</h1>
+      <div class="subtle">Участники, динамика сообщений, Telethon-синхронизация, оповещения и права администраторов — без ручной сверки и разрозненных инструментов.</div>
       <div class="login-feature-grid">
-        <div class="mini-card"><strong>Live analytics</strong><span>Статистика по участникам и сообщениям в реальном времени.</span></div>
-        <div class="mini-card"><strong>Telethon sync</strong><span>Глубокая синхронизация состава чатов и активности.</span></div>
-        <div class="mini-card"><strong>Secure access</strong><span>Авторизация, CSRF-защита и разграничение ролей.</span></div>
+        <div class="mini-card"><strong>Analytics</strong><span>Активность 24ч / 7д / 30д и динамика сообщений.</span></div>
+        <div class="mini-card"><strong>Telethon</strong><span>Синхронизация состава групп и доступного presence.</span></div>
+        <div class="mini-card"><strong>Access</strong><span>Администраторы, роли и настройки уведомлений.</span></div>
       </div>
     </section>
-
-    <section class="card login-card panel">
-      <div class="login-card-head">
-        <h2>Вход в панель</h2>
-        <div class="subtle">Используй учётные данные администратора для продолжения.</div>
-      </div>
+    <section class="panel login-card">
+      <div class="login-card-head"><h2>Вход в панель</h2><div class="subtle">Введите учётные данные Web Admin.</div></div>
       {% if error %}<div class="error" style="margin-top:16px">{{ error }}</div>{% endif %}
-      {% if not configured %}<div class="error" style="margin-top:16px">Задайте <code>WEB_ADMIN_PASSWORD</code> в файле <code>.env</code>.</div>{% endif %}
+      {% if not configured %}<div class="error" style="margin-top:16px">Задайте <code>WEB_ADMIN_PASSWORD</code> в переменных окружения.</div>{% endif %}
       <form method="post" action="/login">
         <label>Логин<input class="input" name="username" autocomplete="username" required></label>
         <label>Пароль<input class="input" type="password" name="password" autocomplete="current-password" required></label>
-        <button class="btn primary block" type="submit">Войти в Lorenzo Admin</button>
+        <button class="btn primary block" type="submit">Войти</button>
       </form>
     </section>
   </div>
