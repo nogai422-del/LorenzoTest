@@ -166,7 +166,9 @@ class Onboarding(StatesGroup):
 
 
 def is_admin(user_id: int) -> bool:
-    return is_system_admin(int(user_id))
+    # OWNER_ID from the current environment is always authoritative.
+    # The database remains the source for all other assigned admins.
+    return int(user_id) == int(OWNER_ID) or is_system_admin(int(user_id))
 
 
 def get_notify_admins() -> list[int]:
@@ -462,6 +464,11 @@ async def start_command(message: Message) -> None:
         "Бот работает. Административные функции доступны только назначенным администраторам.",
         reply_markup=ReplyKeyboardRemove(),
     )
+
+
+@router.message(Command("myid"))
+async def myid_command(message: Message) -> None:
+    await message.reply(f"Ваш Telegram ID: <code>{int(message.from_user.id)}</code>")
 
 
 @router.message(Command("admin"))

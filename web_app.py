@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import secrets
 import time
 from datetime import datetime
@@ -38,7 +39,7 @@ from db import (
 from settings_store import load_settings, save_settings
 from telethon_auth import TelethonAuthError, TelethonAuthManager
 from telethon_config import load_telethon_config, telethon_status
-from runtime_paths import load_or_create_web_secret, web_public_url
+from runtime_paths import DATA_DIR, DATABASE_PATH, load_or_create_web_secret, web_port, web_public_url
 
 load_dotenv()
 
@@ -585,16 +586,28 @@ async def telethon_cancel(request: Request, csrf: str = Form(...)):
 
 @app.get("/health")
 async def health(request: Request):
-    # No secrets here. This endpoint is intentionally public so Bothost and the
-    # owner can see whether the HTTP server, Bot API polling and Telethon runtime
-    # have actually started.
+    # No secret values are returned. This endpoint is intentionally public so
+    # deployment can be diagnosed without shell access on Bothost.
+    bot_status = getattr(request.app.state, "bot_status", "not_started")
+    telethon_runtime = getattr(request.app.state, "telethon_status", "not_started")
     return {
         "ok": True,
+        "ready": bot_status == "running",
         "time": int(time.time()),
+        "config": {
+            "python": platform.python_version(),
+            "port": web_port(),
+            "domain_detected": bool((os.getenv("DOMAIN") or "").strip()),
+            "bot_token_set": bool((os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("API_TOKEN") or "").strip()),
+            "owner_id_set": bool((os.getenv("OWNER_ID") or "").strip()),
+            "web_password_set": bool((os.getenv("WEB_ADMIN_PASSWORD") or "").strip()),
+            "data_dir_exists": DATA_DIR.exists(),
+            "database_exists": DATABASE_PATH.exists(),
+        },
         "runtime": {
-            "bot": getattr(request.app.state, "bot_status", "not_started"),
+            "bot": bot_status,
             "bot_error": getattr(request.app.state, "bot_error", ""),
-            "telethon": getattr(request.app.state, "telethon_status", "not_started"),
+            "telethon": telethon_runtime,
             "telethon_error": getattr(request.app.state, "telethon_error", ""),
         },
     }

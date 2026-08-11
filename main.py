@@ -14,11 +14,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
 from typing import Any
 
 import uvicorn
 
-from runtime_paths import web_port
+from runtime_paths import DATA_DIR, DATABASE_PATH, web_port, web_public_url
 from web_app import app
 
 logging.basicConfig(
@@ -40,8 +41,12 @@ async def _run_bot_runtime() -> None:
     try:
         # Import lazily: a bad/missing bot token must not make the Web Admin
         # disappear.  Instead the reason becomes visible in /health.
-        from bot_app import run_bot
+        from bot_app import bot, run_bot
 
+        # Validate the token and outbound Telegram connectivity before declaring
+        # the bot healthy. This makes /health trustworthy on Bothost.
+        me = await bot.get_me()
+        logger.info("Telegram Bot API connected: @%s (id=%s)", me.username or "-", me.id)
         _set_state("bot", "running")
         await run_bot()
         _set_state("bot", "stopped")
@@ -114,7 +119,14 @@ async def _runtime_startup() -> None:
     if _RUNTIME_TASKS:
         return
     logger.info("Starting Lorenzo runtime")
+    logger.info("Python %s", platform.python_version())
     logger.info("Web Admin listening on 0.0.0.0:%s", web_port())
+    logger.info("Persistent data dir: %s", DATA_DIR)
+    logger.info("Database: %s", DATABASE_PATH)
+    logger.info("Public URL detected: %s", web_public_url() or "not set")
+    logger.info("OWNER_ID configured: %s", bool((os.getenv("OWNER_ID") or "").strip()))
+    logger.info("BOT_TOKEN configured: %s", bool((os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("API_TOKEN") or "").strip()))
+    logger.info("WEB_ADMIN_PASSWORD configured: %s", bool((os.getenv("WEB_ADMIN_PASSWORD") or "").strip()))
     _RUNTIME_TASKS["bot"] = asyncio.create_task(_run_bot_runtime(), name="lorenzo-bot")
     _RUNTIME_TASKS["telethon"] = asyncio.create_task(_run_telethon_runtime(), name="lorenzo-telethon")
 

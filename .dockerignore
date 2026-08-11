@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/
+__pycache__/
+*.py[cod]
+*.session
+*.session-journal
+.git/
+.gitignore
+*.zip
+*.rar
