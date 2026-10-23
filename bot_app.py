@@ -165,9 +165,14 @@ class TrackActivityMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+from dialogue_log import DialogueMiddleware,init_dialogue_log
+init_dialogue_log()
 dp.message.outer_middleware(ChatBoundaryMiddleware())
 dp.callback_query.outer_middleware(ChatBoundaryMiddleware())
 dp.message.outer_middleware(TrackActivityMiddleware())
+dp.message.outer_middleware(DialogueMiddleware())
+dp.edited_message.outer_middleware(ChatBoundaryMiddleware())
+dp.edited_message.outer_middleware(DialogueMiddleware())
 
 
 class Onboarding(StatesGroup):
@@ -924,6 +929,8 @@ async def run_bot() -> None:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as exc:
         await botlog(f"delete_webhook failed: {exc}")
+    from dialogue_log import cleanup_loop
+    asyncio.create_task(cleanup_loop())
     asyncio.create_task(inactivity_watcher(bot, botlog, sleep_seconds=60))
     asyncio.create_task(refresh_admin_commands())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

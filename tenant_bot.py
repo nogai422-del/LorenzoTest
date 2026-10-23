@@ -25,7 +25,8 @@ async def bot_membership(event):
         await warn(event.bot,cid,force=True,inviter_id=event.from_user.id)
     if operational and event.old_chat_member.status!='administrator':
         await event.bot.send_message(cid,'Лоренцо подключён. Бесплатно доступны вопрос о возрасте и согласие на анкету. '
-            'Администраторы могут открыть /admin: настройки и доступ относятся только к этому чату. /tariffs — платные уровни.')
+            'Администраторы могут открыть /admin: настройки и доступ относятся только к этому чату. /tariffs — платные уровни. '
+            'В группе ведётся журнал сообщений для ручной модерации создателем бота. Срок хранения и подробности: /privacy.')
     if not active:
         with get_conn() as c:
             c.execute('DELETE FROM tenant_admins WHERE chat_id=?',(cid,))
@@ -227,3 +228,19 @@ async def support(message):
     await message.answer('Доступ приобретается разово для одного чата. Полный уровень включает редактирование; при повышении оплачивается разница. '
                          'Доступ к управлению есть только у текущих Telegram-администраторов чата. '
                          'Вопросы по оплате и возврату — владельцу бота: '+f'<a href="tg://user?id={int(__import__("os").getenv("OWNER_ID","0"))}">написать</a>.')
+
+
+@router.edited_message()
+async def journal_edited_message(message):
+    # Persistence is done by the group boundary + journal middlewares.
+    pass
+
+
+@router.message(Command('privacy'))
+async def privacy(message):
+    from dialogue_log import retention_days
+    await message.answer('В группах, где Лоренцо назначен администратором, ведётся журнал доступных боту сообщений для ручной модерации создателем. '
+        'Сохраняются чат, автор, время, текст/подпись, тип вложения и полученные правки. '
+        f'Срок хранения — {retention_days()} дней. Журнал доступен только создателю бота; администраторы других чатов его не видят. '
+        'Личные сообщения пользователей боту в журнал не записываются. Медиафайлы для журнала не скачиваются. '
+        'Telegram не сообщает боту обо всех удалениях, поэтому журнал не подтверждает, что сообщение всё ещё есть в группе.')

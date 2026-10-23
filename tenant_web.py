@@ -13,6 +13,8 @@ from db import get_conn, get_chat_info, dashboard_stats, list_members_for_web, l
 
 def install(app, owner_session, secret, secure):
     t.init_tenancy()
+    from dialogue_log import init_dialogue_log
+    init_dialogue_log()
     previews = {}
     auth_managers = {}
     login_failures = {}
@@ -131,6 +133,8 @@ def install(app, owner_session, secret, secure):
             admins=c.execute('SELECT user_id FROM tenant_admins WHERE chat_id=?',(cid,)).fetchall()
         labels=dict(members='Участников',active_24h='Активных за сутки',active_7d='Активных за 7 дней',inactive_7d='Не писали 7 дней',never_wrote='Без сообщений',joined_7d='Вступили за 7 дней',left_7d='Вышли за 7 дней',tracked_chats='Чатов в панели')
         content='<p>Данные, настройки и Telethon относятся только к этому чату.</p>'
+        from dialogue_log import retention_days
+        content+='<section><h2>Журнал модерации</h2><p>Сообщения этой группы доступны создателю бота в журнале ручной модерации. Срок хранения: '+str(retention_days())+' дней. Подробности для участников: /privacy в боте.</p></section>'
         content+='<form method="post" action="/tenant/logout">'+hidden(session['csrf'])+'<button>Выйти из панели</button></form>'
         content+='<div class="stats">'+''.join('<section>'+html.escape(labels.get(k,str(k)))+'<div class="big">'+html.escape(str(v))+'</div></section>' for k,v in stats.items() if isinstance(v,(int,float)))+'</div>'
         content+=f'<section><h2>Настройки онбординга</h2><form method="post" action="/tenant/{cid}/settings">'+hidden(session['csrf'])
@@ -232,7 +236,7 @@ def install(app, owner_session, secret, secure):
         from announcements import destination_status
         import asyncio
         statuses=dict(zip([int(c['chat_id']) for c in chats],await asyncio.gather(*(destination_status(bot,int(c['chat_id'])) for c in chats))))
-        content='<p><a href="/">Управление сервисом</a></p><div class="stats">'
+        content='<p><a href="/">Управление сервисом</a> · <a href="/creator/dialogue">Журнал сообщений</a></p><div class="stats">'
         for label,value in [('Доход за всё время',str(revenue['n'])+' ⭐'),('За месяц · МСК',str(month['n'])+' ⭐'),('Доступных чатов',sum(1 for ok,_ in statuses.values() if ok)),('Уникальных участников',reach)]:
             content+='<section>'+label+'<div class="big">'+str(value)+'</div></section>'
         content+='</div><small>Доход — подтверждённые платежи боту в Stars, до комиссий и вывода. Охват — известные активные участники; полнота зависит от синхронизации.</small>'
@@ -246,6 +250,52 @@ def install(app, owner_session, secret, secure):
         content+='</table></section><section><h2>Объявления</h2><p>Выберите чат и подготовьте короткое сообщение о боте или донате.</p><form action="/creator/preview" method="post">'+hidden(session['csrf'])+'<select name="chat_id">'+options+'</select><textarea name="text" maxlength="1000" placeholder="Текст объявления" required></textarea><button>Предпросмотр</button></form></section>'
         content+='<section><h2>Последние платежи</h2><table><tr><th>Чат</th><th>Stars</th><th>Уровень</th></tr>'+''.join(f'<tr><td>{r["chat_id"]}</td><td>{r["amount"]}</td><td>{r["tier"]}</td></tr>' for r in payments)+'</table></section>'
         return page('Панель создателя',content)
+
+    @app.get('/creator/dialogue')
+    async def dialogue(request: Request,chat_id: str='',author: str='',q: str='',before: int | None=None):
+        session=owner_session(request)
+        try:chat_id=int(chat_id) if chat_id else None
+        except ValueError:raise HTTPException(400,'Некорректный ID чата')
+        from dialogue_log import query_messages,retention_days
+        from datetime import datetime,timezone,timedelta
+        from urllib.parse import urlencode
+        from db import audit
+        rows=query_messages(chat_id,author,q,before,100)
+        chats=list_known_chats(include_untracked=True)
+        options='<option value="">Все чаты</option>'
+        for chat in chats:
+            cid=int(chat['chat_id'])
+            options+=f'<option value="{cid}"'+(' selected' if cid==chat_id else '')+'>'+html.escape(chat['title'] or str(cid))+'</option>'
+        content='<p><a href="/creator">← Панель создателя</a></p><section><p>Журнал доступен только создателю. '
+        content+=f'Хранение — {retention_days()} дней. Записываются новые сообщения групп и полученные правки после включения журнала. '
+        content+='Личные диалоги с ботом и файлы вложений сюда не попадают. Telegram не передаёт боту все события удаления.</p>'
+        content+='<form method="get" action="/creator/dialogue">'
+        content+='<label>Чат</label><select name="chat_id">'+options+'</select>'
+        content+='<label>Автор: ID, @username или имя</label><input name="author" maxlength="100" value="'+html.escape(author[:100],quote=True)+'">'
+        content+='<label>Текст сообщения</label><input name="q" maxlength="200" value="'+html.escape(q[:200],quote=True)+'"><div><button>Показать</button> <a href="/creator/dialogue">Сбросить</a></div></form></section>'
+        if not rows:
+            content+='<section><p>Сообщений по этим условиям пока нет. Журнал начнёт заполняться при получении новых сообщений в группах, где бот является администратором.</p></section>'
+        for row in rows:
+            when=datetime.fromtimestamp(row['version_at'],timezone(timedelta(hours=3))).strftime('%d.%m.%Y %H:%M:%S МСК')
+            title=html.escape(row['chat_title'] or str(row['chat_id']))
+            author_name=html.escape(row['author_name'])
+            username=(' @'+html.escape(row['username'])) if row['username'] else ''
+            content+='<section><small>'+when+' · '+title+(' · ПРАВКА' if row['is_edit'] else '')+'</small><h2>'+author_name+username+'</h2>'
+            content+='<small>ID автора: '+str(row['author_id'])+' · Сообщение №'+str(row['message_id'])+'</small>'
+            if row['reply_to']:content+='<p>Ответ на сообщение №'+str(row['reply_to'])+'</p>'
+            content+='<pre>'+html.escape(row['text'] or '[Вложение без подписи]')+'</pre>'
+            if row['content_type']!='text':content+='<small>Тип вложения: '+html.escape(row['content_type'])+'</small>'
+            url=None
+            if row['chat_username']:url='https://t.me/'+row['chat_username']+'/'+str(row['message_id'])
+            elif str(row['chat_id']).startswith('-100'):url='https://t.me/c/'+str(row['chat_id'])[4:]+'/'+str(row['message_id'])
+            if url:content+='<p><a href="'+html.escape(url,quote=True)+'" rel="noreferrer">Открыть сообщение в Telegram</a></p>'
+            content+='</section>'
+        if len(rows)==100:
+            params=dict(author=author[:100],q=q[:200],before=rows[-1]['cursor'])
+            if chat_id is not None:params['chat_id']=chat_id
+            content+='<p><a href="/creator/dialogue?'+html.escape(urlencode(params),quote=True)+'">Следующие 100 записей →</a></p>'
+        audit('creator:'+str(session['uid']),'dialogue_log_viewed',str(chat_id) if chat_id is not None else 'all')
+        return page('Журнал сообщений',content)
 
     @app.post('/creator/chat-link')
     async def chat_link(request: Request,csrf: str=Form(...),chat_id: int=Form(...)):

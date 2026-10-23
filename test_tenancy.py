@@ -29,7 +29,7 @@ def clean(monkeypatch):
     monkeypatch.setattr(bot_app.bot,'get_chat_administrators',AsyncMock(return_value=[]))
     monkeypatch.setattr(bot_app.bot,'get_chat',AsyncMock(return_value=SimpleNamespace(permissions=None)))
     with db.get_conn() as c:
-        for table in ['tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
+        for table in ['dialogue_log','tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
             c.execute('DELETE FROM '+table)
 
 
@@ -346,3 +346,110 @@ def test_admin_cannot_login_when_bot_is_only_member(monkeypatch):
     login,pw=t.issue_credentials(-1001,42)
     monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(side_effect=lambda cid,uid:SimpleNamespace(status='member' if uid==bot_app.bot.id else 'administrator')))
     assert tenant_login(TestClient(web_app.app),login,pw).status_code==401
+
+
+def sample_dialogue(cid=-1001,mid=1,text='Пример текста',**changes):
+    from aiogram.types import Message,Chat,User
+    from datetime import datetime,timezone
+    data=dict(message_id=mid,date=datetime.now(timezone.utc),chat=Chat(id=cid,type='supergroup',title='Чат '+str(cid)),from_user=User(id=42,is_bot=False,first_name='Автор'),text=text)
+    data.update(changes)
+    return Message(**data)
+
+
+def test_journal_skips_private_and_bot_messages():
+    from dialogue_log import record_message,query_messages
+    from aiogram.types import Chat,User
+    record_message(sample_dialogue(chat=Chat(id=42,type='private'),text='PRIVATE PASSWORD'))
+    record_message(sample_dialogue(from_user=User(id=123,is_bot=True,first_name='Bot')))
+    assert not query_messages()
+
+
+def test_journal_keeps_edits_and_deduplicates():
+    from dialogue_log import record_message,query_messages
+    from datetime import datetime,timezone,timedelta
+    original=sample_dialogue(text='Первый текст')
+    record_message(original);record_message(original)
+    edit=sample_dialogue(text='Правка',edit_date=int((datetime.now(timezone.utc)+timedelta(seconds=1)).timestamp()))
+    record_message(edit);record_message(edit)
+    rows=query_messages(-1001)
+    assert len(rows)==2
+    assert rows[0]['is_edit']==1 and rows[0]['text']=='Правка'
+    assert rows[1]['text']=='Первый текст'
+    assert rows[1]['content_type']=='text'
+
+
+def test_journal_filters_chat_author_and_literal_search():
+    from dialogue_log import record_message,query_messages
+    from aiogram.types import User
+    record_message(sample_dialogue(text='100% тест'))
+    record_message(sample_dialogue(cid=-1002,text='Чужой чат',from_user=User(id=43,is_bot=False,first_name='Второй')))
+    assert len(query_messages(-1001,author='42',q='100%'))==1
+    assert not query_messages(-1001,author='43')
+    assert not query_messages(q="' OR 1=1 --")
+    assert len(query_messages(q='%'))==1
+
+
+def test_journal_retention_and_cleanup():
+    from dialogue_log import record_message,query_messages,cleanup
+    from datetime import datetime,timezone,timedelta
+    record_message(sample_dialogue(date=datetime.now(timezone.utc)-timedelta(days=31)))
+    assert not query_messages()
+    record_message(sample_dialogue())
+    with db.get_conn() as c:c.execute('UPDATE dialogue_log SET version_at=?',(int(__import__('time').time())-31*86400,))
+    assert not query_messages()
+    cleanup()
+    with db.get_conn() as c:assert c.execute('SELECT COUNT(*) FROM dialogue_log').fetchone()[0]==0
+
+
+def test_journal_is_creator_only_and_escapes_messages():
+    from fastapi.testclient import TestClient
+    import web_app
+    from dialogue_log import record_message
+    record_message(sample_dialogue(text='<script>unsafe</script>'))
+    record_message(sample_dialogue(cid=-1002,text='SECRET GROUP B'))
+    client=TestClient(web_app.app)
+    assert client.get('/creator/dialogue',follow_redirects=False).status_code==303
+    grant(-1001)
+    login,pw=t.issue_credentials(-1001,42)
+    assert tenant_login(client,login,pw).status_code==200
+    assert client.get('/creator/dialogue',follow_redirects=False).status_code==303
+    client.post('/login',data={'username':'admin','password':'local-test-password'},follow_redirects=False)
+    response=client.get('/creator/dialogue',params={'chat_id':-1001})
+    assert response.status_code==200 and '&lt;script&gt;' in response.text
+    assert '<script>unsafe' not in response.text and 'SECRET GROUP B' not in response.text
+    assert client.get('/creator/dialogue',params={'chat_id':''}).status_code==200
+
+
+def test_hidden_chat_not_journaled():
+    from dialogue_log import record_message,query_messages
+    db.record_chat(-1001,'Hidden',None,'supergroup',1,tracked=True,discovered_by='bot')
+    db.set_chat_hidden(-1001,True)
+    record_message(sample_dialogue())
+    assert not query_messages()
+
+
+def test_non_admin_bot_cannot_reach_dialogue_recorder():
+    from dialogue_log import DialogueMiddleware,query_messages
+    from tenant_bot import ChatBoundaryMiddleware
+    bot=SimpleNamespace(id=123,get_chat_member=AsyncMock(return_value=SimpleNamespace(status='member')),send_message=AsyncMock())
+    handler=AsyncMock()
+    async def journal_handler(event,data):
+        return await DialogueMiddleware()(handler,event,data)
+    asyncio.run(ChatBoundaryMiddleware()(journal_handler,sample_dialogue().as_(bot),{}))
+    assert not query_messages()
+    handler.assert_not_called()
+
+
+def test_dispatcher_journals_unhandled_group_messages_and_edits():
+    import bot_app,tenant_bot
+    from aiogram.types import Update
+    from dialogue_log import query_messages
+    if tenant_bot.router.parent_router is None:
+        bot_app.dp.include_router(tenant_bot.router)
+    if bot_app.router.parent_router is None:
+        bot_app.dp.include_router(bot_app.router)
+    asyncio.run(bot_app.dp.feed_update(bot_app.bot,Update(update_id=10001,message=sample_dialogue(text='Ordinary group dialogue'))))
+    assert query_messages(-1001)[0]['text']=='Ordinary group dialogue'
+    asyncio.run(bot_app.dp.feed_update(bot_app.bot,Update(update_id=10002,edited_message=sample_dialogue(text='Edited dialogue',edit_date=int(__import__('time').time())))))
+    assert query_messages(-1001)[0]['text']=='Edited dialogue'
+    assert 'edited_message' in bot_app.dp.resolve_used_update_types()
