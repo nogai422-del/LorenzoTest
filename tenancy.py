@@ -29,6 +29,11 @@ def init_tenancy():
             token TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
             tier INTEGER NOT NULL, amount INTEGER NOT NULL, created INTEGER NOT NULL,
             charge TEXT UNIQUE, paid INTEGER, refunded INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS tenant_credentials (
+            chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+            login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1, updated INTEGER NOT NULL,
+            PRIMARY KEY(chat_id,user_id));
         ''')
 
 
@@ -96,6 +101,37 @@ def consume_ticket(token: str):
         if row:
             c.execute('UPDATE tenant_tickets SET used=1 WHERE token=?', (token,))
     return dict(row) if row else None
+
+
+def issue_credentials(chat_id: int, user_id: int) -> tuple[str,str]:
+    """Only call after a live Telegram admin check; plaintext exists only for delivery."""
+    from web_auth import hash_password
+    if tier(chat_id)<2:
+        raise PermissionError('Требуется полный доступ')
+    password=secrets.token_urlsafe(18)
+    encoded=hash_password(password)
+    with get_conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        previous=c.execute('SELECT login FROM tenant_credentials WHERE chat_id=? AND user_id=?',(chat_id,user_id)).fetchone()
+        login=previous['login'] if previous else 'lc_'+secrets.token_hex(6)
+        c.execute('''INSERT INTO tenant_credentials(chat_id,user_id,login,password_hash,updated) VALUES (?,?,?,?,?)
+                  ON CONFLICT(chat_id,user_id) DO UPDATE SET password_hash=excluded.password_hash,
+                  version=tenant_credentials.version+1,updated=excluded.updated''',
+                  (chat_id,user_id,login,encoded,int(time.time())))
+        c.execute('UPDATE tenant_tickets SET used=1 WHERE chat_id=? AND user_id=?',(chat_id,user_id))
+    return login,password
+
+
+def credential_for_login(login: str):
+    with get_conn() as c:
+        row=c.execute('SELECT * FROM tenant_credentials WHERE login=?',(login.strip(),)).fetchone()
+    return dict(row) if row else None
+
+
+def credential_version(chat_id: int,user_id: int) -> int | None:
+    with get_conn() as c:
+        row=c.execute('SELECT version FROM tenant_credentials WHERE chat_id=? AND user_id=?',(chat_id,user_id)).fetchone()
+    return int(row['version']) if row else None
 
 
 def star_price(level: int) -> int:

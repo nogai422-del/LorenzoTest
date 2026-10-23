@@ -22,7 +22,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def clean():
     with db.get_conn() as c:
-        for table in ['tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
+        for table in ['tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
             c.execute('DELETE FROM '+table)
 
 
@@ -134,8 +134,8 @@ def test_web_boundaries(monkeypatch):
     db.set_joined(-1001,70,'Alice',1)
     db.set_joined(-1002,80,'Secret Bob',1)
     client=TestClient(web_app.app)
-    token=t.new_ticket(-1001,42)
-    response=client.get('/tenant/login',params={'token':token})
+    login,password=t.issue_credentials(-1001,42)
+    response=tenant_login(client,login,password)
     assert response.status_code==200 and 'Alice' in response.text and 'Secret Bob' not in response.text
     assert 'Secret Tenant B' not in response.text
     assert db.dashboard_stats(-1001)['tracked_chats']==1
@@ -199,3 +199,63 @@ def test_creator_chat_link_is_owner_only(monkeypatch):
     response=client.post('/creator/chat-link',data={'csrf':csrf,'chat_id':-1001})
     assert response.status_code==200 and 'https://t.me/+demo' in response.text
     assert create.call_args.kwargs['member_limit']==1
+
+
+def tenant_login(client,login,password):
+    import re
+    response=client.get('/tenant/login')
+    csrf=re.search('name="csrf" value="([^"]+)"',response.text).group(1)
+    return client.post('/tenant/login',data={'username':login,'password':password,'csrf':csrf})
+
+
+def test_passwords_unique_and_hashed():
+    grant(-1001);grant(-1002)
+    login1,pw1=t.issue_credentials(-1001,42)
+    login2,pw2=t.issue_credentials(-1002,42)
+    assert login1!=login2 and pw1!=pw2
+    row=t.credential_for_login(login1)
+    assert row['password_hash']!=pw1 and row['chat_id']==-1001
+    from web_auth import verify_password
+    assert verify_password(pw1,row['password_hash'])
+    assert not verify_password(pw2,row['password_hash'])
+
+
+def test_password_rotation_revokes_sessions(monkeypatch):
+    from fastapi.testclient import TestClient
+    import web_app,bot_app
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(return_value=SimpleNamespace(status='administrator')))
+    monkeypatch.setattr(bot_app.bot,'get_chat_administrators',AsyncMock(return_value=[]))
+    grant(-1001)
+    login,pw=t.issue_credentials(-1001,42)
+    client=TestClient(web_app.app)
+    assert tenant_login(client,login,pw).status_code==200
+    login2,pw2=t.issue_credentials(-1001,42)
+    assert login2==login and pw2!=pw
+    assert client.get('/tenant/-1001').status_code==403
+    assert tenant_login(client,login,pw).status_code==401
+    assert tenant_login(client,login2,pw2).status_code==200
+
+
+def test_password_login_csrf_and_removed_admin(monkeypatch):
+    from fastapi.testclient import TestClient
+    import web_app,bot_app
+    grant(-1001)
+    login,pw=t.issue_credentials(-1001,42)
+    client=TestClient(web_app.app)
+    assert client.post('/tenant/login',data={'username':login,'password':pw,'csrf':'fake'}).status_code==403
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(return_value=SimpleNamespace(status='member')))
+    assert tenant_login(client,login,pw).status_code==401
+    token=t.new_ticket(-1001,42)
+    response=client.get('/tenant/login',params={'token':token})
+    assert 'Вход по старым' in response.text
+    assert client.get('/tenant/-1001').status_code==403
+
+
+def test_credentials_are_per_admin():
+    grant(-1001)
+    first,pw=t.issue_credentials(-1001,42)
+    second,pw2=t.issue_credentials(-1001,43)
+    old=t.credential_version(-1001,43)
+    t.issue_credentials(-1001,42)
+    assert first!=second and pw!=pw2
+    assert t.credential_version(-1001,43)==old

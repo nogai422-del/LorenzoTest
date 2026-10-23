@@ -50,7 +50,7 @@ def menu(chat_id: int):
         price = t.star_price(2) - (t.star_price(1) if level == 1 else 0)
         rows.append([InlineKeyboardButton(text=f'Полный доступ · {max(1,price)} ⭐', callback_data=f'tenant:buy:{chat_id}:2')])
     if level >= 2:
-        rows.append([InlineKeyboardButton(text='Персональная веб-панель', callback_data=f'tenant:panel:{chat_id}:2')])
+        rows.append([InlineKeyboardButton(text='Веб-панель · получить / обновить пароль', callback_data=f'tenant:panel:{chat_id}:2')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -110,10 +110,18 @@ async def action(call: CallbackQuery):
         if not web_public_url():
             await call.answer('Веб-адрес ещё не настроен', show_alert=True)
             return
-        ticket = t.new_ticket(chat_id, call.from_user.id)
         try:
-            await call.bot.send_message(call.from_user.id, 'Личная ссылка действует 5 минут и открывает только этот чат.',
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Открыть панель', url=web_public_url()+'/tenant/login?token='+ticket)]]))
+            # Check that the private conversation is available before rotating credentials.
+            await call.bot.send_chat_action(call.from_user.id,'typing')
+            login,password = t.issue_credentials(chat_id, call.from_user.id)
+            info=await call.bot.get_chat(chat_id)
+            await call.bot.send_message(call.from_user.id,
+                f'<b>Доступ к панели чата «{html.escape(info.title or str(chat_id))}»</b>\n'
+                f'Логин: <code>{html.escape(login)}</code>\nПароль: <tg-spoiler>{html.escape(password)}</tg-spoiler>\n\n'
+                'Это ваши личные данные входа только для этого чата. Сохраните пароль: бот не хранит его в открытом виде. '
+                'Повторное нажатие «получить / обновить пароль» заменит пароль и завершит прежние сеансы. '
+                'После снятия прав администратора вход будет закрыт.',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Открыть панель', url=web_public_url()+'/tenant/login')]]))
         except Exception:
             await call.answer('Сначала откройте личный чат с ботом и нажмите Start.', show_alert=True)
             return

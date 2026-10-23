@@ -15,6 +15,7 @@ def install(app, owner_session, secret, secure):
     t.init_tenancy()
     previews = {}
     auth_managers = {}
+    login_failures = {}
 
     def sign(body):
         return hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
@@ -36,7 +37,8 @@ def install(app, owner_session, secret, secure):
     async def access(request, cid, csrf=None):
         from bot_app import bot
         session = read(request)
-        if not session or session['cid'] != cid or t.tier(cid) < 2:
+        if (not session or not session.get('cv') or session['cid'] != cid or t.tier(cid) < 2
+                or session.get('cv') != t.credential_version(cid,session['uid'])):
             raise HTTPException(403,'Нет доступа к чату')
         if csrf is not None and not hmac.compare_digest(session['csrf'], csrf):
             raise HTTPException(403,'Недействительный запрос')
@@ -58,16 +60,64 @@ def install(app, owner_session, secret, secure):
     def hidden(csrf):
         return '<input type="hidden" name="csrf" value="'+html.escape(csrf)+'">'
 
+    def login_form(error=None):
+        csrf=secrets.token_urlsafe(32)
+        content='<section><p>Введите личный логин и пароль, полученные у Лоренцо для конкретного чата.</p>'
+        if error: content+='<p role="alert">'+html.escape(error)+'</p>'
+        content+='<form method="post" action="/tenant/login">'+hidden(csrf)
+        content+='<label for="tenant-login">Логин</label><input id="tenant-login" name="username" autocomplete="username" maxlength="80" required>'
+        content+='<label for="tenant-password">Пароль</label><input id="tenant-password" name="password" type="password" autocomplete="current-password" maxlength="256" required>'
+        content+='<div><button>Войти в панель чата</button></div></form><small>Чтобы получить или обновить пароль: /admin в боте → свой чат → «Веб-панель · получить / обновить пароль».</small></section>'
+        response=page('Вход в панель чата',content)
+        response.set_cookie('lorenzo_chat_login_csrf',csrf,httponly=True,secure=secure,samesite='strict',max_age=900,path='/tenant')
+        return response
+
     @app.get('/tenant/login')
-    async def login(request: Request, token: str):
-        ticket = t.consume_ticket(token)
-        if not ticket: raise HTTPException(403,'Ссылка истекла. Запросите новую у бота.')
+    async def login(request: Request, token: str | None = None):
+        return login_form('Вход по старым одноразовым ссылкам закрыт. Получите личный пароль у бота.' if token else None)
+
+    @app.post('/tenant/login')
+    async def password_login(request: Request,username: str=Form(...),password: str=Form(...),csrf: str=Form(...)):
+        if not csrf or not hmac.compare_digest(request.cookies.get('lorenzo_chat_login_csrf',''),csrf):
+            raise HTTPException(403,'Обновите страницу входа')
+        now=int(time.time())
+        ip=request.client.host if request.client else 'unknown'
+        key=(ip,username.strip())
+        for entry in list(login_failures):
+            login_failures[entry]=[ts for ts in login_failures[entry] if ts>now-900]
+            if not login_failures[entry]:login_failures.pop(entry,None)
+        if len(login_failures.get(key,[]))>=8 or len(login_failures.get((ip,'*'),[]))>=30:
+            response=login_form('Слишком много попыток. Повторите через 15 минут.')
+            response.status_code=429
+            return response
+        from web_auth import verify_password,hash_password
+        if not hasattr(password_login,'dummy_hash'):
+            password_login.dummy_hash=hash_password(secrets.token_urlsafe(24))
+        row=t.credential_for_login(username)
+        valid=verify_password(password,row['password_hash'] if row else password_login.dummy_hash)
         from bot_app import bot
-        cid, uid = ticket['chat_id'],ticket['user_id']
-        if t.tier(cid)<2 or not await t.is_chat_admin(bot,cid,uid): raise HTTPException(403,'Нет доступа')
+        if valid and row:
+            valid=t.tier(row['chat_id'])>=2 and await t.is_chat_admin(bot,row['chat_id'],row['user_id'])
+        if not valid or not row:
+            login_failures.setdefault(key,[]).append(now)
+            login_failures.setdefault((ip,'*'),[]).append(now)
+            response=login_form('Неверные данные входа или доступ к чату закрыт.')
+            response.status_code=401
+            return response
+        login_failures.pop(key,None)
+        cid,uid=row['chat_id'],row['user_id']
         response=RedirectResponse(f'/tenant/{cid}',303)
-        response.set_cookie('lorenzo_chat_session',encode(dict(cid=cid,uid=uid,exp=int(time.time())+3600,csrf=secrets.token_urlsafe(24))),
+        response.set_cookie('lorenzo_chat_session',encode(dict(cid=cid,uid=uid,cv=row['version'],exp=now+3600,csrf=secrets.token_urlsafe(24))),
                             httponly=True,secure=secure,samesite='strict',max_age=3600,path='/tenant')
+        response.delete_cookie('lorenzo_chat_login_csrf',path='/tenant')
+        return response
+
+    @app.post('/tenant/logout')
+    async def logout(request: Request,csrf: str=Form(...)):
+        session=read(request)
+        if not session or not hmac.compare_digest(session['csrf'],csrf):raise HTTPException(403)
+        response=RedirectResponse('/tenant/login',303)
+        response.delete_cookie('lorenzo_chat_session',path='/tenant')
         return response
 
     @app.get('/tenant/{cid}')
@@ -81,6 +131,7 @@ def install(app, owner_session, secret, secure):
             admins=c.execute('SELECT user_id FROM tenant_admins WHERE chat_id=?',(cid,)).fetchall()
         labels=dict(members='Участников',active_24h='Активных за сутки',active_7d='Активных за 7 дней',inactive_7d='Не писали 7 дней',never_wrote='Без сообщений',joined_7d='Вступили за 7 дней',left_7d='Вышли за 7 дней',tracked_chats='Чатов в панели')
         content='<p>Данные, настройки и Telethon относятся только к этому чату.</p>'
+        content+='<form method="post" action="/tenant/logout">'+hidden(session['csrf'])+'<button>Выйти из панели</button></form>'
         content+='<div class="stats">'+''.join('<section>'+html.escape(labels.get(k,str(k)))+'<div class="big">'+html.escape(str(v))+'</div></section>' for k,v in stats.items() if isinstance(v,(int,float)))+'</div>'
         content+=f'<section><h2>Настройки онбординга</h2><form method="post" action="/tenant/{cid}/settings">'+hidden(session['csrf'])
         for key,label in [('welcome_text','Приветствие · {name}'),('consent_text','Анкета · {age}'),('nudge_text','Напоминание · {mention}')]:
