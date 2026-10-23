@@ -102,7 +102,9 @@ def participant_joined_at(user) -> int | None:
 
 
 class TelethonSyncService:
-    def __init__(self) -> None:
+    def __init__(self, chat_id: int | None = None) -> None:
+        import tenancy
+        self.chat_id = int(chat_id if chat_id is not None else tenancy.HOME_CHAT_ID)
         config = load_telethon_config()
         if not config["enabled"]:
             raise RuntimeError("Telethon disabled")
@@ -137,7 +139,7 @@ class TelethonSyncService:
                 "or run `python telethon_login.py`."
             )
 
-        recovered = requeue_running_sync_requests()
+        recovered = 0  # No global queue mutation from a chat worker.
         if recovered:
             logger.warning("Requeued %s interrupted sync request(s)", recovered)
 
@@ -179,6 +181,11 @@ class TelethonSyncService:
                 if runtime_config.get("setup_pending"):
                     logger.info("Telethon authorization wizard started; disconnecting worker")
                     break
+                import tenancy
+                if tenancy.tier(self.chat_id) < 2:
+                    break
+                if runtime_config.get("session_string") != self.session_string:
+                    break
                 now = int(time.time())
                 if now - self._last_discovery >= self.discovery_interval:
                     await self.discover_groups()
@@ -199,27 +206,11 @@ class TelethonSyncService:
             await self.stop()
 
     async def discover_groups(self) -> int:
-        count = 0
-        try:
-            async for dialog in self.client.iter_dialogs():
-                identity = chat_identity(dialog.entity)
-                if not identity:
-                    continue
-                chat_id, title, username, chat_type = identity
-                record_chat(
-                    chat_id, title, username, chat_type,
-                    int(time.time()), tracked=None, discovered_by="telethon",
-                )
-                count += 1
-        except errors.FloodWaitError as exc:
-            logger.warning("FloodWait during dialog discovery: %ss", exc.seconds)
-            await asyncio.sleep(exc.seconds)
-        except Exception:
-            logger.exception("Telethon group discovery failed")
-        return count
+        # Never enumerate an account's other dialogs, even for the bot creator.
+        return 0
 
     async def _process_manual_requests(self) -> None:
-        for request in claim_sync_requests(10):
+        for request in claim_sync_requests(10, chat_id=self.chat_id):
             request_id = int(request["id"])
             chat_id = int(request["chat_id"])
             try:
@@ -236,7 +227,7 @@ class TelethonSyncService:
                 finish_sync_request(request_id, error=str(exc))
 
     async def _sync_due_chats(self, now: int) -> None:
-        for chat_id in list_tracked_chat_ids():
+        for chat_id in [cid for cid in list_tracked_chat_ids() if cid == self.chat_id]:
             info = get_chat_info(chat_id) or {}
             last_sync = int(info.get("last_member_sync_at") or 0)
             if now - last_sync < self.sync_interval:
@@ -259,6 +250,9 @@ class TelethonSyncService:
         sync_history: bool = True,
         force_history_backfill: bool = False,
     ) -> dict:
+        import tenancy
+        if int(chat_id) != self.chat_id or tenancy.tier(chat_id) < 2:
+            raise ValueError("Chat outside this Telethon session scope")
         lock = self._sync_locks.setdefault(int(chat_id), asyncio.Lock())
         async with lock:
             current = get_chat_info(chat_id) or {}
@@ -271,7 +265,7 @@ class TelethonSyncService:
             resolved_id, title, username, chat_type = identity
             if int(resolved_id) != int(chat_id):
                 logger.info("Resolved chat id %s -> %s", chat_id, resolved_id)
-                chat_id = resolved_id
+                raise ValueError("Resolved peer is outside session scope")
             record_chat(chat_id, title, username, chat_type, int(time.time()), tracked=None, discovered_by="telethon")
 
             result = {"members": 0, "left": 0, "messages": 0}
@@ -371,6 +365,9 @@ class TelethonSyncService:
             if not identity:
                 return
             chat_id, title, username, chat_type = identity
+            import tenancy
+            if chat_id != self.chat_id or tenancy.tier(chat_id) < 2:
+                return
             record_chat(chat_id, title, username, chat_type, int(time.time()), tracked=None, discovered_by="telethon")
             info = get_chat_info(chat_id) or {}
             if not int(info.get("is_tracked") or 0):
@@ -408,6 +405,9 @@ class TelethonSyncService:
             if not identity:
                 return
             chat_id, title, username, chat_type = identity
+            import tenancy
+            if chat_id != self.chat_id or tenancy.tier(chat_id) < 2:
+                return
             record_chat(chat_id, title, username, chat_type, int(time.time()), tracked=None, discovered_by="telethon")
             info = get_chat_info(chat_id) or {}
             if not int(info.get("is_tracked") or 0):

@@ -104,6 +104,19 @@ app = FastAPI(title="Lorenzo Admin", docs_url=None, redoc_url=None)
 
 
 @app.middleware("http")
+async def legacy_boundary(request: Request, call_next):
+    path = request.url.path
+    if path.startswith(("/tenant/", "/static/")) or path in {"/login", "/health"}:
+        return await call_next(request)
+    session = _read_session(request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    if session.get("role") != "owner" or int(session.get("uid", 0)) != OWNER_ID:
+        return HTMLResponse("Доступ только создателю. Получите персональную ссылку через /admin в боте.", status_code=403)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -974,3 +987,7 @@ async def health(request: Request):
             "telethon_error": getattr(request.app.state, "telethon_error", ""),
         },
     }
+
+
+from tenant_web import install as install_tenant_web
+install_tenant_web(app, require_owner_session, WEB_SECRET, WEB_COOKIE_SECURE)

@@ -12,6 +12,20 @@ from runtime_paths import TELETHON_CONFIG_PATH
 load_dotenv()
 
 CONFIG_PATH = TELETHON_CONFIG_PATH
+
+def config_path():
+    from tenancy import chat_context, HOME_CHAT_ID
+    from runtime_paths import DATA_DIR
+    cid = chat_context.get()
+    if cid is None or cid == HOME_CHAT_ID:
+        return CONFIG_PATH
+    folder = DATA_DIR / "tenants" / str(int(cid))
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return folder / ".telethon_config.json"
+
+def tenant_environment_allowed():
+    from tenancy import chat_context, HOME_CHAT_ID
+    return chat_context.get() in (None, HOME_CHAT_ID)
 SETUP_TTL_SECONDS = 30 * 60
 _UNSET = object()
 
@@ -24,6 +38,8 @@ def _env_bool(name: str, default: bool = True) -> bool:
 
 
 def _first_env(*names: str) -> str:
+    if not tenant_environment_allowed():
+        return ""
     for name in names:
         value = (os.getenv(name) or "").strip()
         if value:
@@ -32,10 +48,10 @@ def _first_env(*names: str) -> str:
 
 
 def _read_file() -> dict[str, Any]:
-    if not CONFIG_PATH.exists():
+    if not config_path().exists():
         return {}
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(config_path().read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -122,7 +138,7 @@ def save_telethon_config(
     current.pop("session", None)
 
     current["updated_at"] = int(time.time())
-    tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    tmp = config_path().with_suffix(".json.tmp")
     payload = json.dumps(current, ensure_ascii=False, indent=2)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -134,9 +150,9 @@ def save_telethon_config(
             tmp.unlink(missing_ok=True)
         finally:
             raise
-    os.replace(tmp, CONFIG_PATH)
+    os.replace(tmp, config_path())
     try:
-        os.chmod(CONFIG_PATH, 0o600)
+        os.chmod(config_path(), 0o600)
     except OSError:
         pass
     return load_telethon_config()
@@ -184,5 +200,5 @@ def telethon_status() -> dict[str, Any]:
         "status_label": label,
         "status_kind": kind,
         "session": "StringSession" if cfg["has_session"] else "—",
-        "storage_file": str(CONFIG_PATH),
+        "storage_file": str(config_path()),
     }

@@ -54,6 +54,9 @@ from db import (
 )
 from inactivity import inactivity_watcher, send_test_inactivity_alert
 from settings_store import load_settings, save_settings
+import tenancy
+from tenant_bot import ChatBoundaryMiddleware, router as tenant_router
+tenancy.init_tenancy()
 from telethon_config import telethon_status
 from runtime_paths import LOG_PATH, PROJECT_DIR, SETTINGS_PATH, web_public_url
 
@@ -147,7 +150,7 @@ class TrackActivityMiddleware(BaseMiddleware):
                     return await handler(event, data)
                 ensure_chat_settings(chat_id)
                 is_service = bool(event.new_chat_members or event.left_chat_member)
-                if event.from_user and not event.from_user.is_bot and not is_service:
+                if tenancy.tier(chat_id) >= 2 and event.from_user and not event.from_user.is_bot and not is_service:
                     upsert_message_activity(
                         chat_id=chat_id,
                         user_id=int(event.from_user.id),
@@ -162,6 +165,8 @@ class TrackActivityMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+dp.message.outer_middleware(ChatBoundaryMiddleware())
+dp.callback_query.outer_middleware(ChatBoundaryMiddleware())
 dp.message.outer_middleware(TrackActivityMiddleware())
 
 
@@ -181,7 +186,8 @@ def get_notify_admins() -> list[int]:
 
 
 def current_settings() -> dict:
-    return load_settings(OWNER_ID)
+    cid = tenancy.chat_context.get()
+    return tenancy.settings(cid, OWNER_ID) if cid is not None else load_settings(OWNER_ID)
 
 
 def parse_hhmm(value: str) -> dtime:
@@ -243,7 +249,10 @@ def is_refusal(text: str | None) -> bool:
 
 
 async def notify_admins(text: str) -> None:
-    for admin_id in get_notify_admins():
+    cid = tenancy.chat_context.get()
+    if cid is None:
+        return
+    for admin_id in await tenancy.refresh_admins(bot, cid):
         try:
             await bot.send_message(admin_id, text)
         except Exception as exc:
@@ -320,6 +329,8 @@ async def do_ban(message: Message, reason: str) -> None:
 
 
 async def maybe_ban_on_suspicious_links(message: Message) -> bool:
+    if tenancy.tier(message.chat.id) < 1:
+        return False
     text = ((message.text or "") + " " + (message.caption or "")).lower()
     has_username = bool(re.search(r"(^|\s)@[\w_]{5,32}($|\s)", text))
     if "http://" in text or "https://" in text or "t.me/" in text or has_username:
@@ -404,10 +415,11 @@ async def left_chat_member_handler(message: Message) -> None:
     if int(chat_info.get("is_hidden") or 0):
         return
     set_left(int(message.chat.id), int(message.left_chat_member.id), int(time.time()))
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    if tenancy.tier(message.chat.id) >= 1:
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
 
 @router.message(Onboarding.waiting_for_age)
@@ -427,9 +439,6 @@ async def process_age(message: Message, state: FSMContext) -> None:
     age = int(match.group(1))
     if age < 18 or age >= 70:
         await handle_user_failure(message, state, f"Возраст вне диапазона: {age}")
-        return
-    if level_value() == 1:
-        await state.clear()
         return
     await typed_delay()
     await message.reply(current_settings()["texts"]["consent_text"].format(age=age))
@@ -909,6 +918,7 @@ async def refresh_admin_commands() -> None:
 
 async def run_bot() -> None:
     await botlog("BOT START")
+    dp.include_router(tenant_router)
     dp.include_router(router)
     try:
         await bot.delete_webhook(drop_pending_updates=True)

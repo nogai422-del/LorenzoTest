@@ -59,58 +59,45 @@ async def _run_bot_runtime() -> None:
 
 
 async def _run_telethon_runtime() -> None:
-    _set_state("telethon", "starting")
+    import tenancy as t
+    from db import list_tracked_chat_ids
+    from telethon_config import load_telethon_config
+    from telethon_sync import TelethonSyncService
+    workers = {}
+
+    async def run_one(cid):
+        token = t.chat_context.set(cid)
+        try:
+            while t.tier(cid) >= 2:
+                cfg = load_telethon_config()
+                if not cfg['enabled'] or not cfg['configured'] or not cfg['has_session'] or cfg['setup_pending']:
+                    await asyncio.sleep(5)
+                    continue
+                try:
+                    await TelethonSyncService(cid).run_forever()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning('Telethon worker failed for chat %s', cid)
+                    await asyncio.sleep(10)
+        finally:
+            t.chat_context.reset(token)
+
+    _set_state('telethon', 'running')
     try:
-        from telethon_config import load_telethon_config
-        from telethon_sync import TelethonSyncService
-
-        last_status_log = 0.0
-        _set_state("telethon", "waiting")
         while True:
-            cfg = load_telethon_config()
-            now = asyncio.get_running_loop().time()
-
-            if not cfg.get("enabled"):
-                _set_state("telethon", "disabled")
-                if now - last_status_log >= 60:
-                    logger.info("Telethon sync is disabled")
-                    last_status_log = now
-                await asyncio.sleep(5)
-                continue
-
-            if cfg.get("setup_pending"):
-                _set_state("telethon", "setup")
-                await asyncio.sleep(3)
-                continue
-
-            if not cfg.get("configured") or not cfg.get("has_session"):
-                _set_state("telethon", "waiting")
-                if now - last_status_log >= 60:
-                    logger.info("Telethon awaits configuration/authorization in Web Admin")
-                    last_status_log = now
-                await asyncio.sleep(5)
-                continue
-
-            service = None
-            try:
-                _set_state("telethon", "running")
-                service = TelethonSyncService()
-                await service.run_forever()
-            except asyncio.CancelledError:
-                if service:
-                    await service.stop()
-                _set_state("telethon", "stopped")
-                raise
-            except Exception as exc:
-                logger.exception("Telethon worker failed")
-                _set_state("telethon", "error", f"{type(exc).__name__}: {exc}")
-                await asyncio.sleep(10)
-    except asyncio.CancelledError:
-        _set_state("telethon", "stopped")
-        raise
-    except Exception as exc:
-        logger.exception("Telethon runtime failed before supervisor loop")
-        _set_state("telethon", "error", f"{type(exc).__name__}: {exc}")
+            desired = {cid for cid in list_tracked_chat_ids() if t.tier(cid) >= 2}
+            for cid in list(workers):
+                if cid not in desired or workers[cid].done():
+                    workers[cid].cancel()
+                    await asyncio.gather(workers.pop(cid), return_exceptions=True)
+            for cid in desired:
+                if cid not in workers:
+                    workers[cid] = asyncio.create_task(run_one(cid))
+            await asyncio.sleep(5)
+    finally:
+        for task in workers.values(): task.cancel()
+        await asyncio.gather(*workers.values(), return_exceptions=True)
 
 
 async def _runtime_startup() -> None:

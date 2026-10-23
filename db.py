@@ -395,7 +395,7 @@ def record_chat(
                     WHEN ? IS NULL THEN chats.is_tracked
                     ELSE excluded.is_tracked
                 END,
-                discovered_by=COALESCE(excluded.discovered_by, chats.discovered_by)
+                discovered_by=CASE WHEN chats.discovered_by='bot' THEN 'bot' ELSE COALESCE(excluded.discovered_by, chats.discovered_by) END
             """,
             (int(chat_id), title, username, chat_type, now_ts, tracked_value, discovered_by, tracked),
         )
@@ -1129,11 +1129,11 @@ def requeue_running_sync_requests() -> int:
         return int(cur.rowcount)
 
 
-def claim_sync_requests(limit: int = 10) -> list[sqlite3.Row]:
+def claim_sync_requests(limit: int = 10, *, chat_id: int | None = None) -> list[sqlite3.Row]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM sync_requests WHERE status='pending' ORDER BY requested_at LIMIT ?",
-            (int(limit),),
+            "SELECT * FROM sync_requests WHERE status='pending' AND chat_id=? ORDER BY requested_at LIMIT ?",
+            (chat_id, int(limit)),
         ).fetchall()
         if rows:
             conn.executemany(
@@ -1261,6 +1261,8 @@ def dashboard_stats(chat_id: int | None = None) -> dict:
         ).fetchone()
         tracked = conn.execute(
             "SELECT COUNT(*) AS n FROM chats WHERE is_tracked=1 AND COALESCE(is_hidden,0)=0 AND chat_type IN ('group','supergroup')"
+            + (" AND chat_id=?" if chat_id is not None else ""),
+            (int(chat_id),) if chat_id is not None else (),
         ).fetchone()["n"]
     return {
         "members": int(row["members"] or 0),

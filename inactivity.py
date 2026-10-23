@@ -68,6 +68,9 @@ async def check_chat_now(
     botlog: Callable,
     force: bool = False,
 ) -> int:
+    import tenancy
+    if tenancy.tier(chat_id) < 2:
+        return 0
     now_ts = int(time.time())
     info = get_chat_info(chat_id) or {}
     if info.get("chat_type") not in {"group", "supergroup"} or not int(info.get("is_tracked") or 0):
@@ -93,7 +96,8 @@ async def check_chat_now(
     )
     sent = 0
     threshold = now_ts - int(settings["inactivity_days"]) * 86400
-    recipients = list(admin_user_ids) if admin_user_ids is not None else list_admin_ids(notifications_only=True)
+    allowed = set(await tenancy.refresh_admins(bot, chat_id))
+    recipients = sorted(allowed.intersection(admin_user_ids) if admin_user_ids is not None else allowed)
 
     for row in rows:
         user_id = int(row["user_id"])
