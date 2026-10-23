@@ -1119,11 +1119,12 @@ def request_sync(chat_id: int, requested_by: str, request_type: str = "full") ->
         return int(cur.lastrowid)
 
 
-def requeue_running_sync_requests() -> int:
+def requeue_running_sync_requests(chat_id: int | None = None) -> int:
     """Return interrupted manual sync requests to the queue after a worker restart."""
     with get_conn() as conn:
         cur = conn.execute(
-            "UPDATE sync_requests SET status='pending', error=NULL WHERE status='running'"
+            "UPDATE sync_requests SET status='pending', error=NULL WHERE status='running' AND chat_id=?",
+            (chat_id,),
         )
         conn.commit()
         return int(cur.rowcount)
@@ -1305,10 +1306,10 @@ def activity_series(chat_id: int | None = None, days: int = 30) -> list[dict]:
     return result
 
 
-def cleanup_seen_messages(retention_days: int = 45) -> int:
+def cleanup_seen_messages(retention_days: int = 45, *, chat_id: int | None = None) -> int:
     threshold = int(time.time()) - max(7, int(retention_days)) * 86400
     with get_conn() as conn:
-        cur = conn.execute("DELETE FROM seen_messages WHERE sent_at<?", (threshold,))
+        cur = conn.execute("DELETE FROM seen_messages WHERE sent_at<? AND chat_id=?", (threshold, chat_id))
         conn.commit()
         return int(cur.rowcount or 0)
 

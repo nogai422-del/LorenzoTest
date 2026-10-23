@@ -139,7 +139,7 @@ class TelethonSyncService:
                 "or run `python telethon_login.py`."
             )
 
-        recovered = 0  # No global queue mutation from a chat worker.
+        recovered = requeue_running_sync_requests(self.chat_id)
         if recovered:
             logger.warning("Requeued %s interrupted sync request(s)", recovered)
 
@@ -195,7 +195,7 @@ class TelethonSyncService:
                 await self._sync_due_chats(now)
 
                 if now - self._last_cleanup >= 6 * 3600:
-                    cleanup_seen_messages(max(45, self.history_days + 15))
+                    cleanup_seen_messages(max(45, self.history_days + 15), chat_id=self.chat_id)
                     self._last_cleanup = now
 
                 try:
@@ -359,6 +359,8 @@ class TelethonSyncService:
         return new_messages
 
     async def _on_new_message(self, event) -> None:
+        if int(event.chat_id or 0) != self.chat_id:
+            return
         try:
             chat = await event.get_chat()
             identity = chat_identity(chat)
@@ -399,6 +401,8 @@ class TelethonSyncService:
             logger.exception("Failed to process Telethon NewMessage")
 
     async def _on_chat_action(self, event) -> None:
+        if int(event.chat_id or 0) != self.chat_id:
+            return
         try:
             chat = await event.get_chat()
             identity = chat_identity(chat)

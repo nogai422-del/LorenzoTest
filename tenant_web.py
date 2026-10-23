@@ -169,14 +169,16 @@ def install(app, owner_session, secret, secure):
     @app.get('/creator')
     async def creator(request: Request):
         session=owner_session(request)
+        from datetime import datetime,timezone,timedelta
+        month_start=int(datetime.now(timezone(timedelta(hours=3))).replace(day=1,hour=0,minute=0,second=0,microsecond=0).timestamp())
         with get_conn() as c:
             revenue=c.execute('SELECT COALESCE(SUM(amount),0) n,COUNT(*) cnt FROM tenant_orders WHERE paid IS NOT NULL AND refunded=0').fetchone()
-            month=c.execute("SELECT COALESCE(SUM(amount),0) n FROM tenant_orders WHERE paid>=CAST(strftime('%s','now','start of month') AS INTEGER) AND refunded=0").fetchone()
+            month=c.execute("SELECT COALESCE(SUM(amount),0) n FROM tenant_orders WHERE paid>=? AND refunded=0",(month_start,)).fetchone()
             reach=c.execute('SELECT COUNT(DISTINCT user_id) n FROM chat_members WHERE is_bot=0 AND is_active=1').fetchone()['n']
             payments=c.execute('SELECT chat_id,amount,tier,paid FROM tenant_orders WHERE paid IS NOT NULL ORDER BY paid DESC LIMIT 50').fetchall()
         chats=list_known_chats(include_untracked=True)
         content='<p><a href="/">Управление сервисом</a></p><div class="stats">'
-        for label,value in [('Доход за всё время',str(revenue['n'])+' ⭐'),('За месяц UTC',str(month['n'])+' ⭐'),('Чатов',len(chats)),('Уникальных участников',reach)]:
+        for label,value in [('Доход за всё время',str(revenue['n'])+' ⭐'),('За месяц · МСК',str(month['n'])+' ⭐'),('Чатов',len(chats)),('Уникальных участников',reach)]:
             content+='<section>'+label+'<div class="big">'+str(value)+'</div></section>'
         content+='</div><small>Доход — подтверждённые платежи боту в Stars, до комиссий и вывода. Охват — известные активные участники; полнота зависит от синхронизации.</small>'
         content+='<section><h2>Подключённые чаты</h2><table><tr><th>Чат</th><th>ID</th><th>Тариф</th><th>Открыть</th></tr>'

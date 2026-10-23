@@ -70,6 +70,13 @@ def test_ticket_single_use():
     assert t.consume_ticket(token) is None
 
 
+def test_refund_restores_previous_level():
+    grant(-1001,1)
+    token=grant(-1001,2)
+    t.record_refund(t.get_order(token)['charge'])
+    assert t.tier(-1001)==1 and t.tier(t.HOME_CHAT_ID)==2
+
+
 def test_telethon_never_falls_back_to_owner(monkeypatch):
     monkeypatch.setenv('TELETHON_API_ID','123')
     monkeypatch.setenv('TELETHON_API_HASH','owner-secret')
@@ -174,3 +181,21 @@ def test_creator_metrics_and_preview(monkeypatch):
     assert client.post('/creator/send',data={'csrf':csrf,'token':token}).status_code==200
     assert client.post('/creator/send',data={'csrf':csrf,'token':token}).status_code==400
     send.assert_called_once()
+
+
+def test_creator_chat_link_is_owner_only(monkeypatch):
+    from fastapi.testclient import TestClient
+    import web_app,bot_app
+    db.record_chat(-1001,'Example',None,'supergroup',1,tracked=True,discovered_by='bot')
+    client=TestClient(web_app.app)
+    assert client.post('/creator/chat-link',data={'csrf':'bad','chat_id':-1001},follow_redirects=False).status_code==303
+    client.post('/login',data={'username':'admin','password':'local-test-password'},follow_redirects=False)
+    import re
+    csrf=re.search('name="csrf" value="([^"]+)"',client.get('/creator').text).group(1)
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(return_value=SimpleNamespace(status='administrator')))
+    monkeypatch.setattr(bot_app.bot,'get_chat',AsyncMock(return_value=SimpleNamespace(username=None,invite_link=None,title='Example')))
+    create=AsyncMock(return_value=SimpleNamespace(invite_link='https://t.me/+demo'))
+    monkeypatch.setattr(bot_app.bot,'create_chat_invite_link',create)
+    response=client.post('/creator/chat-link',data={'csrf':csrf,'chat_id':-1001})
+    assert response.status_code==200 and 'https://t.me/+demo' in response.text
+    assert create.call_args.kwargs['member_limit']==1

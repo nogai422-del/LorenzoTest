@@ -11,6 +11,22 @@ from runtime_paths import web_public_url
 router = Router(name='tenant_commands')
 
 
+@router.my_chat_member()
+async def bot_membership(event):
+    if event.chat.type not in {'group','supergroup'}:
+        return
+    cid=int(event.chat.id)
+    active=event.new_chat_member.status not in {'left','kicked'}
+    record_chat(cid,event.chat.title,event.chat.username,event.chat.type,int(time.time()),tracked=active,discovered_by='bot')
+    if active and event.old_chat_member.status in {'left','kicked'}:
+        await event.bot.send_message(cid,'Лоренцо подключён. Бесплатно доступны вопрос о возрасте и согласие на анкету. '
+            'Администраторы могут открыть /admin: настройки и доступ относятся только к этому чату. /tariffs — платные уровни.')
+    if not active:
+        with get_conn() as c:
+            c.execute('DELETE FROM tenant_admins WHERE chat_id=?',(cid,))
+            c.execute('UPDATE tenant_tickets SET used=1 WHERE chat_id=?',(cid,))
+
+
 class ChatBoundaryMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         chat = getattr(event, 'chat', None) or getattr(getattr(event, 'message', None), 'chat', None)
@@ -133,6 +149,11 @@ async def payment(message):
     await message.answer(f'Оплата подтверждена. Уровень {order["tier"]} доступен чату {order["chat_id"]}.')
 
 
+@router.message(F.refunded_payment)
+async def refunded(message):
+    t.record_refund(message.refunded_payment.telegram_payment_charge_id)
+
+
 @router.message(Command('edit'))
 async def edit(message):
     parts = (message.text or '').split(maxsplit=3)
@@ -168,7 +189,15 @@ async def edit(message):
         await message.answer(html.escape(str(exc)) or 'Проверьте команду /edit')
 
 
-@router.message(Command('terms','paysupport','support','creator'))
+@router.message(Command('creator'))
+async def creator_link(message):
+    import os
+    if message.chat.type=='private' and message.from_user.id==int(os.getenv('OWNER_ID','0')) and web_public_url():
+        await message.answer('Ваша панель создателя: доход, охват, чаты, объявления и вход в чаты.',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Панель создателя',url=web_public_url()+'/creator')]]))
+
+
+@router.message(Command('terms','paysupport','support'))
 async def support(message):
     await message.answer('Доступ приобретается разово для одного чата. Полный уровень включает редактирование; при повышении оплачивается разница. '
                          'Доступ к управлению есть только у текущих Telegram-администраторов чата. '

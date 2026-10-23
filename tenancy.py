@@ -135,3 +135,13 @@ def confirm_payment(token: str, user_id: int, amount: int, currency: str, charge
         c.execute('INSERT INTO tenant_config(chat_id,tier) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET tier=MAX(tier,excluded.tier)',
                   (row['chat_id'], row['tier']))
     return True
+
+
+def record_refund(charge: str):
+    with get_conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT chat_id FROM tenant_orders WHERE charge=?',(charge,)).fetchone()
+        if not row:return
+        c.execute('UPDATE tenant_orders SET refunded=1 WHERE charge=?',(charge,))
+        level=c.execute('SELECT COALESCE(MAX(tier),0) n FROM tenant_orders WHERE chat_id=? AND paid IS NOT NULL AND refunded=0',(row['chat_id'],)).fetchone()['n']
+        c.execute('UPDATE tenant_config SET tier=? WHERE chat_id=?',(level,row['chat_id']))
