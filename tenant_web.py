@@ -228,16 +228,21 @@ def install(app, owner_session, secret, secure):
             reach=c.execute('SELECT COUNT(DISTINCT user_id) n FROM chat_members WHERE is_bot=0 AND is_active=1').fetchone()['n']
             payments=c.execute('SELECT chat_id,amount,tier,paid FROM tenant_orders WHERE paid IS NOT NULL ORDER BY paid DESC LIMIT 50').fetchall()
         chats=list_known_chats(include_untracked=True)
+        from bot_app import bot
+        from announcements import destination_status
+        import asyncio
+        statuses=dict(zip([int(c['chat_id']) for c in chats],await asyncio.gather(*(destination_status(bot,int(c['chat_id'])) for c in chats))))
         content='<p><a href="/">Управление сервисом</a></p><div class="stats">'
-        for label,value in [('Доход за всё время',str(revenue['n'])+' ⭐'),('За месяц · МСК',str(month['n'])+' ⭐'),('Чатов',len(chats)),('Уникальных участников',reach)]:
+        for label,value in [('Доход за всё время',str(revenue['n'])+' ⭐'),('За месяц · МСК',str(month['n'])+' ⭐'),('Доступных чатов',sum(1 for ok,_ in statuses.values() if ok)),('Уникальных участников',reach)]:
             content+='<section>'+label+'<div class="big">'+str(value)+'</div></section>'
         content+='</div><small>Доход — подтверждённые платежи боту в Stars, до комиссий и вывода. Охват — известные активные участники; полнота зависит от синхронизации.</small>'
-        content+='<section><h2>Подключённые чаты</h2><table><tr><th>Чат</th><th>ID</th><th>Тариф</th><th>Открыть</th></tr>'
+        content+='<section><h2>Известные чаты</h2><p>Доступ для отправки проверяется через Telegram. Чат в базе может быть недоступен самому боту.</p><table><tr><th>Чат</th><th>ID</th><th>Тариф</th><th>Отправка</th><th>Открыть</th></tr>'
         options=''
         for chat in chats:
             cid=int(chat['chat_id']);name=html.escape(chat['title'] or str(cid))
-            content+=f'<tr><td>{name}</td><td>{cid}</td><td>{t.tier(cid)}</td><td><form method="post" action="/creator/chat-link">'+hidden(session['csrf'])+f'<input type="hidden" name="chat_id" value="{cid}"><button>Войти в чат</button></form></td></tr>'
-            if chat['discovered_by']=='bot':options+=f'<option value="{cid}">{name}</option>'
+            available,reason=statuses[cid]
+            content+=f'<tr><td>{name}</td><td>{cid}</td><td>{t.tier(cid)}</td><td>'+html.escape(reason)+'</td><td><form method="post" action="/creator/chat-link">'+hidden(session['csrf'])+f'<input type="hidden" name="chat_id" value="{cid}"><button>Войти в чат</button></form></td></tr>'
+            options+=f'<option value="{cid}"'+('' if available else ' disabled')+'>'+name+('' if available else ' — нет доступа бота')+'</option>'
         content+='</table></section><section><h2>Объявления</h2><p>Выберите чат и подготовьте короткое сообщение о боте или донате.</p><form action="/creator/preview" method="post">'+hidden(session['csrf'])+'<select name="chat_id">'+options+'</select><textarea name="text" maxlength="1000" placeholder="Текст объявления" required></textarea><button>Предпросмотр</button></form></section>'
         content+='<section><h2>Последние платежи</h2><table><tr><th>Чат</th><th>Stars</th><th>Уровень</th></tr>'+''.join(f'<tr><td>{r["chat_id"]}</td><td>{r["amount"]}</td><td>{r["tier"]}</td></tr>' for r in payments)+'</table></section>'
         return page('Панель создателя',content)
@@ -271,7 +276,12 @@ def install(app, owner_session, secret, secure):
         session=owner_session(request)
         if not hmac.compare_digest(session['csrf'],csrf):raise HTTPException(403)
         info=get_chat_info(chat_id)
-        if not info or info['discovered_by']!='bot' or not 1<=len(text.strip())<=1000:raise HTTPException(400,'Проверьте чат и текст')
+        if not info or not 1<=len(text.strip())<=1000:raise HTTPException(400,'Проверьте чат и текст')
+        from bot_app import bot
+        from announcements import destination_status
+        available,reason=await destination_status(bot,chat_id)
+        if not available:
+            return page('Отправка недоступна','<section><p>'+html.escape(reason)+'</p></section><a href="/creator">Вернуться</a>')
         token=secrets.token_urlsafe(24)
         previews[token]=(chat_id,text,int(time.time())+600,session['uid'])
         return page('Предпросмотр объявления','<section><h2>'+html.escape(info['title'] or str(chat_id))+'</h2><pre>'+html.escape(text)+'</pre><form method="post" action="/creator/send">'+hidden(csrf)+'<input type="hidden" name="token" value="'+token+'"><button>Отправить в этот чат</button></form></section>')
@@ -284,6 +294,14 @@ def install(app, owner_session, secret, secure):
         if not item or item[2]<time.time() or item[3]!=session['uid']:raise HTTPException(400,'Предпросмотр истёк')
         from bot_app import bot
         from db import audit
-        await bot.send_message(item[0],item[1],parse_mode=None,disable_web_page_preview=True)
+        from announcements import destination_status,telegram_error
+        from aiogram.exceptions import TelegramBadRequest,TelegramForbiddenError,TelegramRetryAfter,TelegramNetworkError
+        available,reason=await destination_status(bot,item[0])
+        if not available:
+            return page('Отправка недоступна','<section><p>'+html.escape(reason)+'</p></section><a href="/creator">Вернуться</a>')
+        try:
+            await bot.send_message(item[0],item[1],parse_mode=None,disable_web_page_preview=True)
+        except (TelegramBadRequest,TelegramForbiddenError,TelegramRetryAfter,TelegramNetworkError) as exc:
+            return page('Сообщение не отправлено','<section><p>'+html.escape(telegram_error(exc))+'</p></section><a href="/creator">Вернуться</a>')
         audit('creator:'+str(session['uid']),'announcement_sent',str(item[0]))
         return page('Объявление отправлено','<p>Сообщение отправлено в выбранный чат.</p><a href="/creator">Вернуться</a>')

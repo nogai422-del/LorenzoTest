@@ -20,7 +20,11 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def clean():
+def clean(monkeypatch):
+    import bot_app
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(return_value=SimpleNamespace(status='administrator')))
+    monkeypatch.setattr(bot_app.bot,'get_chat_administrators',AsyncMock(return_value=[]))
+    monkeypatch.setattr(bot_app.bot,'get_chat',AsyncMock(return_value=SimpleNamespace(permissions=None)))
     with db.get_conn() as c:
         for table in ['tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
             c.execute('DELETE FROM '+table)
@@ -259,3 +263,46 @@ def test_credentials_are_per_admin():
     t.issue_credentials(-1001,42)
     assert first!=second and pw!=pw2
     assert t.credential_version(-1001,43)==old
+
+
+def test_announcement_chat_not_found(monkeypatch):
+    from fastapi.testclient import TestClient
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import GetChatMember
+    import web_app,bot_app,re
+    db.record_chat(-1001,'Unavailable second chat',None,'supergroup',1,tracked=True,discovered_by='bot')
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(side_effect=TelegramBadRequest(method=GetChatMember(chat_id=-1001,user_id=bot_app.bot.id),message='Bad Request: chat not found')))
+    send=AsyncMock();monkeypatch.setattr(bot_app.bot,'send_message',send)
+    client=TestClient(web_app.app)
+    client.post('/login',data={'username':'admin','password':'local-test-password'},follow_redirects=False)
+    response=client.get('/creator')
+    assert response.status_code==200 and 'нет доступа бота' in response.text
+    csrf=re.search('name="csrf" value="([^"]+)"',response.text).group(1)
+    response=client.post('/creator/preview',data={'csrf':csrf,'chat_id':-1001,'text':'Announcement'})
+    assert response.status_code==200 and 'Чат недоступен самому Лоренцо' in response.text
+    send.assert_not_called()
+
+
+def test_announcement_send_error_is_readable(monkeypatch):
+    from fastapi.testclient import TestClient
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+    import web_app,bot_app,re
+    db.record_chat(-1001,'Example',None,'supergroup',1,tracked=True,discovered_by='telethon')
+    client=TestClient(web_app.app)
+    client.post('/login',data={'username':'admin','password':'local-test-password'},follow_redirects=False)
+    response=client.get('/creator')
+    csrf=re.search('name="csrf" value="([^"]+)"',response.text).group(1)
+    response=client.post('/creator/preview',data={'csrf':csrf,'chat_id':-1001,'text':'Announcement'})
+    assert 'Предпросмотр объявления' in response.text
+    token=re.search('name="token" value="([^"]+)"',response.text).group(1)
+    monkeypatch.setattr(bot_app.bot,'send_message',AsyncMock(side_effect=TelegramBadRequest(method=SendMessage(chat_id=-1001,text='x'),message='Bad Request: chat not found')))
+    response=client.post('/creator/send',data={'csrf':csrf,'token':token})
+    assert response.status_code==200 and 'Сообщение не отправлено' in response.text and 'Чат недоступен самому' in response.text
+
+
+def test_restricted_announcement_bot():
+    from announcements import destination_status
+    bot=SimpleNamespace(id=123,get_chat_member=AsyncMock(return_value=SimpleNamespace(status='restricted',can_send_messages=False)))
+    available,reason=asyncio.run(destination_status(bot,-1001))
+    assert not available and 'нет разрешения' in reason
