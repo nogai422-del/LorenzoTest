@@ -129,6 +129,11 @@ class TelethonSyncService:
         self._last_cleanup = 0
         self._sync_locks: dict[int, asyncio.Lock] = {}
 
+    async def operational(self):
+        from bot_app import bot
+        from bot_permissions import has_admin_rights
+        return await has_admin_rights(bot,self.chat_id)
+
     async def start(self) -> None:
         await self.client.connect()
         if not await self.client.is_user_authorized():
@@ -186,6 +191,9 @@ class TelethonSyncService:
                     break
                 if runtime_config.get("session_string") != self.session_string:
                     break
+                if not await self.operational():
+                    await asyncio.sleep(5)
+                    continue
                 now = int(time.time())
                 if now - self._last_discovery >= self.discovery_interval:
                     await self.discover_groups()
@@ -253,6 +261,8 @@ class TelethonSyncService:
         import tenancy
         if int(chat_id) != self.chat_id or tenancy.tier(chat_id) < 2:
             raise ValueError("Chat outside this Telethon session scope")
+        if not await self.operational():
+            raise ValueError("Bot administrator rights required")
         lock = self._sync_locks.setdefault(int(chat_id), asyncio.Lock())
         async with lock:
             current = get_chat_info(chat_id) or {}
@@ -282,6 +292,8 @@ class TelethonSyncService:
         participants = 0
         human_participants = 0
         async for user in self.client.iter_participants(entity):
+            if not await self.operational():
+                raise ValueError("Bot administrator rights revoked")
             participants += 1
             is_bot = bool(getattr(user, "bot", False))
             if not is_bot:
@@ -324,6 +336,8 @@ class TelethonSyncService:
         new_messages = 0
         scanned = 0
         async for message in self.client.iter_messages(entity, limit=self.history_max_messages):
+            if not await self.operational():
+                raise ValueError("Bot administrator rights revoked")
             scanned += 1
             msg_ts = _to_ts(getattr(message, "date", None)) or 0
             if msg_ts and msg_ts < cutoff_ts:
@@ -359,7 +373,7 @@ class TelethonSyncService:
         return new_messages
 
     async def _on_new_message(self, event) -> None:
-        if int(event.chat_id or 0) != self.chat_id:
+        if int(event.chat_id or 0) != self.chat_id or not await self.operational():
             return
         try:
             chat = await event.get_chat()
@@ -401,7 +415,7 @@ class TelethonSyncService:
             logger.exception("Failed to process Telethon NewMessage")
 
     async def _on_chat_action(self, event) -> None:
-        if int(event.chat_id or 0) != self.chat_id:
+        if int(event.chat_id or 0) != self.chat_id or not await self.operational():
             return
         try:
             chat = await event.get_chat()

@@ -22,6 +22,9 @@ import pytest
 @pytest.fixture(autouse=True)
 def clean(monkeypatch):
     import bot_app
+    import bot_permissions
+    bot_permissions._status.clear()
+    bot_permissions._notices.clear()
     monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(return_value=SimpleNamespace(status='administrator')))
     monkeypatch.setattr(bot_app.bot,'get_chat_administrators',AsyncMock(return_value=[]))
     monkeypatch.setattr(bot_app.bot,'get_chat',AsyncMock(return_value=SimpleNamespace(permissions=None)))
@@ -306,3 +309,40 @@ def test_restricted_announcement_bot():
     bot=SimpleNamespace(id=123,get_chat_member=AsyncMock(return_value=SimpleNamespace(status='restricted',can_send_messages=False)))
     available,reason=asyncio.run(destination_status(bot,-1001))
     assert not available and 'нет разрешения' in reason
+
+
+def test_non_admin_bot_does_not_process_group_message():
+    from tenant_bot import ChatBoundaryMiddleware
+    from aiogram.types import Message,Chat,User
+    from datetime import datetime
+    bot=SimpleNamespace(id=123,get_chat_member=AsyncMock(return_value=SimpleNamespace(status='member')),send_message=AsyncMock())
+    message=Message(message_id=1,date=datetime.now(),chat=Chat(id=-1001,type='supergroup'),from_user=User(id=42,is_bot=False,first_name='Admin'),text='/admin').as_(bot)
+    handler=AsyncMock()
+    asyncio.run(ChatBoundaryMiddleware()(handler,message,{}))
+    handler.assert_not_called()
+    assert 'приостановлен' in bot.send_message.call_args.args[1]
+
+
+def test_demotion_invalidates_cached_admin_status():
+    from bot_permissions import has_admin_rights,update_status
+    bot=SimpleNamespace(id=123,get_chat_member=AsyncMock(return_value=SimpleNamespace(status='administrator')))
+    assert asyncio.run(has_admin_rights(bot,-1001))
+    update_status(-1001,'member')
+    assert not asyncio.run(has_admin_rights(bot,-1001))
+
+
+def test_admin_warning_throttled():
+    from bot_permissions import warn
+    bot=SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(warn(bot,-1001))
+    asyncio.run(warn(bot,-1001))
+    bot.send_message.assert_called_once()
+
+
+def test_admin_cannot_login_when_bot_is_only_member(monkeypatch):
+    from fastapi.testclient import TestClient
+    import web_app,bot_app
+    grant(-1001)
+    login,pw=t.issue_credentials(-1001,42)
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(side_effect=lambda cid,uid:SimpleNamespace(status='member' if uid==bot_app.bot.id else 'administrator')))
+    assert tenant_login(TestClient(web_app.app),login,pw).status_code==401

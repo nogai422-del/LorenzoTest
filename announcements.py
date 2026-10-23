@@ -24,11 +24,8 @@ async def destination_status(bot,chat_id):
             return False,'Лоренцо не состоит в чате. Добавьте бота и вызовите /admin в группе.'
         if member.status=='restricted' and not getattr(member,'can_send_messages',False):
             return False,'У Лоренцо нет разрешения отправлять сообщения.'
-        if member.status=='member':
-            info=await bot.get_chat(chat_id)
-            permissions=getattr(info,'permissions',None)
-            if permissions is not None and permissions.can_send_messages is False:
-                return False,'В чате запрещена отправка сообщений обычным участникам. Разрешите её боту или назначьте его администратором.'
+        if member.status!='administrator':
+            return False,'Лоренцо приостановлен: назначьте бота администратором этого чата. Работа без прав администратора отключена.'
         return True,'Доступ к чату подтверждён'
     except (TelegramBadRequest,TelegramForbiddenError,TelegramRetryAfter,TelegramNetworkError) as exc:
         return False,telegram_error(exc)

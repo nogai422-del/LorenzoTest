@@ -17,8 +17,13 @@ async def bot_membership(event):
         return
     cid=int(event.chat.id)
     active=event.new_chat_member.status not in {'left','kicked'}
-    record_chat(cid,event.chat.title,event.chat.username,event.chat.type,int(time.time()),tracked=active,discovered_by='bot')
-    if active and event.old_chat_member.status in {'left','kicked'}:
+    from bot_permissions import update_status,warn
+    update_status(cid,event.new_chat_member.status)
+    operational=event.new_chat_member.status=='administrator'
+    record_chat(cid,event.chat.title,event.chat.username,event.chat.type,int(time.time()),tracked=operational,discovered_by='bot')
+    if active and not operational:
+        await warn(event.bot,cid,force=True,inviter_id=event.from_user.id)
+    if operational and event.old_chat_member.status!='administrator':
         await event.bot.send_message(cid,'Лоренцо подключён. Бесплатно доступны вопрос о возрасте и согласие на анкету. '
             'Администраторы могут открыть /admin: настройки и доступ относятся только к этому чату. /tariffs — платные уровни.')
     if not active:
@@ -32,6 +37,14 @@ class ChatBoundaryMiddleware(BaseMiddleware):
         chat = getattr(event, 'chat', None) or getattr(getattr(event, 'message', None), 'chat', None)
         token = t.chat_context.set(int(chat.id) if chat and chat.type in {'group','supergroup'} else None)
         try:
+            if chat and chat.type in {'group','supergroup'}:
+                from bot_permissions import has_admin_rights,warn
+                if not await has_admin_rights(event.bot,chat.id):
+                    if isinstance(event,CallbackQuery):
+                        await event.answer('Бот приостановлен: назначьте Лоренцо администратором чата.',show_alert=True)
+                    else:
+                        await warn(event.bot,chat.id,force=bool(event.text and event.text.startswith(('/admin','/start','/tariffs'))))
+                    return
             # Old callback buttons must never expose global lists or change global settings.
             if isinstance(event, CallbackQuery) and (event.data or '').startswith('adm:'):
                 await event.answer('Старое меню закрыто. Откройте /admin в нужном чате.', show_alert=True)
@@ -100,6 +113,10 @@ async def action(call: CallbackQuery):
         return
     if not await t.is_chat_admin(call.bot, chat_id, call.from_user.id):
         await call.answer('Нет доступа к чату', show_alert=True)
+        return
+    from bot_permissions import has_admin_rights,WARNING
+    if not await has_admin_rights(call.bot,chat_id,fresh=True):
+        await call.answer('Бот приостановлен: сначала назначьте Лоренцо администратором группы.',show_alert=True)
         return
     if action == 'open':
         await show_menu(call.message, chat_id)

@@ -68,6 +68,9 @@ def save_chat_settings(chat_id: int, value: dict):
 
 
 async def is_chat_admin(bot, chat_id: int, user_id: int) -> bool:
+    from bot_permissions import has_admin_rights
+    if not await has_admin_rights(bot,chat_id,fresh=True):
+        return False
     try:
         member = await bot.get_chat_member(int(chat_id), int(user_id))
         return member.status in {'creator', 'administrator'}

@@ -76,6 +76,10 @@ async def check_chat_now(
     if info.get("chat_type") not in {"group", "supergroup"} or not int(info.get("is_tracked") or 0):
         return 0
 
+    from bot_permissions import has_admin_rights,warn
+    if not await has_admin_rights(bot,chat_id):
+        await warn(bot,chat_id)
+        return 0
     settings = get_chat_settings(chat_id)
     if not settings["enabled"] and not force:
         return 0
