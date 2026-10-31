@@ -61,4 +61,56 @@ final class BluetoothRepair {
      "Системные Bluetooth-службы и сохранённые сопряжения программа не сбрасывает. "+
      "Если ошибка повторяется, запусти «Диагностика Bluetooth» и сохрани результат.";
  }
+
+ /** Store sanitized snapshots on the phone; never reset bonds or collect MAC addresses. */
+ String saveSnapshot(android.content.SharedPreferences prefs,String ip,boolean failed)throws Exception{
+   String label=failed?"failure":"success";
+   String report=diagnostics();
+   String at=new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",java.util.Locale.getDefault()).format(new java.util.Date());
+   prefs.edit().putString("max_"+ip+"_"+label,at+"\\n"+report).apply();
+   return "Снимок '"+(failed?"во время ошибки":"после успешного подключения")+"' сохранён на телефоне.\\n\\n"+report;
+ }
+ String compare(android.content.SharedPreferences prefs,String ip){
+   String failure=prefs.getString("max_"+ip+"_failure",null);
+   String success=prefs.getString("max_"+ip+"_success",null);
+   if(failure==null||success==null)return "Чтобы сравнить, сделай оба снимка: при ошибке и после успешного подключения. Снимки не изменяют Bluetooth.";
+   StringBuilder b=new StringBuilder("СРАВНЕНИЕ BLUETOOTH СТАНЦИИ МАКС\\n\\n");
+   java.util.LinkedHashSet<String> a=lines(failure),c=lines(success);
+   b.append("Только при ошибке:\\n");
+   for(String x:a)if(!c.contains(x))b.append(x).append("\\n");
+   b.append("\\nТолько при успешном подключении:\\n");
+   for(String x:c)if(!a.contains(x))b.append(x).append("\\n");
+   b.append("\\nЗаметка: A2DP и состояние аудио можно отличить по строкам в отчёте. Разница не устанавливает причину автоматически. Bluetooth-пульт и все сопряжения сохранены.");
+   return b.toString();
+ }
+ private static java.util.LinkedHashSet<String> lines(String value){
+   java.util.LinkedHashSet<String> set=new java.util.LinkedHashSet<>();
+   for(String l:value.split("\\r?\\n")){
+     String s=l.trim();
+     if(s.length()>0&&!s.startsWith("СОСТОЯНИЕ")&&!s.startsWith("АУДИО /")&&!s.startsWith("Android:")&&!s.startsWith("Это чтение"))set.add(s);
+   }
+   return set;
+ }
+ static String maxGuide(String problem){
+   String common="\\n\\nНЕ МЕНЯЙ: Bluetooth ON в Factory Menu, системные пакеты Bluetooth и привязку пульта. "+
+    "Не запускай полный сброс телевизора. Если нужна новая пара, удаляй вручную только 'Яндекс Станция Макс'.";
+   if("A".equals(problem))return "СТАНЦИЯ МАКС: ОБНАРУЖЕНА, НО НЕ ПОДКЛЮЧАЕТСЯ\\n"+
+    "1. Отключи от Станции телефон, ноутбук и другие источники Bluetooth — допускается только одно активное соединение.\\n"+
+    "2. Скажи: «Алиса, включи Bluetooth».\\n"+
+    "3. Открой Bluetooth на ТВ и выбери Станцию Макс.\\n"+
+    "4. Если ошибка повторится, сделай «Снимок во время сбоя». Лишь затем попробуй удалить на ТВ сопряжение со Станцией и создать его заново."+common;
+   if("B".equals(problem))return "СТАНЦИЯ МАКС: ОТВАЛИВАЕТСЯ ПОСЛЕ ПОДКЛЮЧЕНИЯ\\n"+
+    "1. Убедись, что другое устройство не перехватывает Станцию по Bluetooth.\\n"+
+    "2. Поставь колонку близко к телевизору и убери препятствия.\\n"+
+    "3. Проверь, работает ли звук и какой выход выбран на телевизоре.\\n"+
+    "4. Сохрани снимок сразу после успешного соединения и снимок после обрыва; затем сравни их.\\n"+
+    "5. Если обрывы повторяются, обнови прошивки ТВ и Станции штатным способом."+common;
+   return "СТАНЦИЯ МАКС: НЕ ПОДКЛЮЧАЕТСЯ ПОСЛЕ ВКЛЮЧЕНИЯ ТВ\\n"+
+    "1. Яндекс предупреждает: автоматическое переподключение после перезагрузки не гарантируется.\\n"+
+    "2. Скажи: «Алиса, включи Bluetooth».\\n"+
+    "3. На ТВ выбери ранее сопряжённую Станцию и нажми «Подключить».\\n"+
+    "4. Если это не помогает, только сопряжение Станции можно удалить вручную и создать заново.\\n"+
+    "5. Для постоянных отказов сохрани снимок состояния Bluetooth."+common;
+ }
+
 }
