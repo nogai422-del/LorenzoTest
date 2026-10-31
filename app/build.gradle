@@ -1,2 +1,2 @@
 plugins { id 'com.android.application' }
-android { namespace 'com.hartens.optimizer'; compileSdk 35; defaultConfig { applicationId 'com.hartens.optimizer'; minSdk 26; targetSdk 32; versionCode 5; versionName '2.1' }; compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 } }
+android { namespace 'com.hartens.optimizer'; compileSdk 35; defaultConfig { applicationId 'com.hartens.optimizer'; minSdk 26; targetSdk 32; versionCode 6; versionName '2.2' }; compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 } }
