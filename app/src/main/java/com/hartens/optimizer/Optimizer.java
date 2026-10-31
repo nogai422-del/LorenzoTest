@@ -7,6 +7,7 @@ final class Optimizer {
  static final String[] ANIM = {"window_animation_scale","transition_animation_scale","animator_duration_scale"};
  static final String GAMES="ru.yandex.games", BUGS="com.yandex.tv.bugreportsender", ADID="com.yandex.android.advid";
  private final AdbClient adb;
+ AdbClient adbForDiagnostics(){return adb;}
  private final SharedPreferences prefs;
  private final String scope;
  Optimizer(AdbClient adb, SharedPreferences prefs, String ip){this.adb=adb;this.prefs=prefs;this.scope="host_"+ip+"_";}
