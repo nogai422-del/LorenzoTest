@@ -34,6 +34,13 @@ def init_tenancy():
             login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
             version INTEGER NOT NULL DEFAULT 1, updated INTEGER NOT NULL,
             PRIMARY KEY(chat_id,user_id));
+        CREATE TABLE IF NOT EXISTS tenant_operators (
+            chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,display_name TEXT,
+            assigned_by INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(chat_id,user_id));
+        CREATE TABLE IF NOT EXISTS tenant_notifications (
+            chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(chat_id,user_id));
         ''')
 
 
@@ -77,7 +84,7 @@ def patch_chat_settings(chat_id: int,changes: dict):
         current=normalize_settings(json.loads(row['settings']),0) if row else fallback
         for key,value in changes.items():
             if key in {'welcome_text','consent_text','nudge_text'}:current['texts'][key]=value
-            elif key in {'is_active','work_start','work_end','reply_delay'}:current[key]=value
+            elif key in {'is_active','work_start','work_end','reply_delay','level'}:current[key]=value
             else:raise ValueError('Unknown setting')
         current=normalize_settings(current,0)
         c.execute('INSERT INTO tenant_config(chat_id,settings) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET settings=excluded.settings',
@@ -91,7 +98,11 @@ async def is_chat_admin(bot, chat_id: int, user_id: int) -> bool:
         return False
     try:
         member = await bot.get_chat_member(int(chat_id), int(user_id))
-        return member.status in {'creator', 'administrator'}
+        if member.status in {'creator','administrator'}:return True
+        if not present_member(member):return False
+        with get_conn() as c:
+            row=c.execute('SELECT active FROM tenant_operators WHERE chat_id=? AND user_id=?',(chat_id,user_id)).fetchone()
+        return bool(row and row['active'])
     except Exception:
         return False
 
@@ -102,10 +113,54 @@ async def refresh_admins(bot, chat_id: int) -> list[int]:
     except Exception:
         return []  # Fail closed; never fall back to global or stale recipients.
     ids = [int(m.user.id) for m in rows if not m.user.is_bot]
+    for operator in list_operators(chat_id):
+        try:
+            member=await bot.get_chat_member(chat_id,operator['user_id'])
+            if present_member(member) and not member.user.is_bot:ids.append(int(operator['user_id']))
+        except Exception:pass
+    ids=sorted(set(ids))
     with get_conn() as c:
         c.execute('DELETE FROM tenant_admins WHERE chat_id=?', (int(chat_id),))
         c.executemany('INSERT INTO tenant_admins(chat_id,user_id) VALUES (?,?)', [(int(chat_id), uid) for uid in ids])
     return ids
+
+
+def present_member(member):
+    return member.status in {'member','administrator','creator'} or (member.status=='restricted' and bool(getattr(member,'is_member',False)))
+
+
+async def can_manage_operators(bot,chat_id,user_id):
+    try:
+        member=await bot.get_chat_member(chat_id,user_id)
+        return member.status=='creator' or (member.status=='administrator' and (bool(getattr(member,'can_promote_members',False)) or user_id==int(os.getenv('OWNER_ID','0'))))
+    except Exception:return False
+
+
+def list_operators(chat_id):
+    with get_conn() as c:return c.execute('SELECT * FROM tenant_operators WHERE chat_id=? AND active=1 ORDER BY user_id',(chat_id,)).fetchall()
+
+
+def set_operator(chat_id,user_id,actor_id,display_name='',enabled=True):
+    with get_conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('''INSERT INTO tenant_operators(chat_id,user_id,display_name,assigned_by,active) VALUES (?,?,?,?,?)
+                  ON CONFLICT(chat_id,user_id) DO UPDATE SET display_name=excluded.display_name,assigned_by=excluded.assigned_by,active=excluded.active''',
+                  (chat_id,user_id,display_name,actor_id,int(enabled)))
+        c.execute('UPDATE tenant_credentials SET version=version+1'+(",password_hash=''" if not enabled else '')+' WHERE chat_id=? AND user_id=?',(chat_id,user_id))
+        c.execute('UPDATE tenant_tickets SET used=1 WHERE chat_id=? AND user_id=?',(chat_id,user_id))
+
+
+def notifications_enabled(chat_id,user_id):
+    with get_conn() as c:row=c.execute('SELECT enabled FROM tenant_notifications WHERE chat_id=? AND user_id=?',(chat_id,user_id)).fetchone()
+    return bool(row['enabled']) if row else True
+
+
+def set_chat_notifications(chat_id,user_id,enabled):
+    with get_conn() as c:c.execute('INSERT INTO tenant_notifications VALUES (?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET enabled=excluded.enabled',(chat_id,user_id,int(enabled)))
+
+
+async def notification_recipients(bot,chat_id):
+    return [uid for uid in await refresh_admins(bot,chat_id) if notifications_enabled(chat_id,uid)]
 
 
 def new_ticket(chat_id: int, user_id: int) -> str:

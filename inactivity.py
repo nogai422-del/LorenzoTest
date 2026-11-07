@@ -100,7 +100,7 @@ async def check_chat_now(
     )
     sent = 0
     threshold = now_ts - int(settings["inactivity_days"]) * 86400
-    allowed = set(await tenancy.refresh_admins(bot, chat_id))
+    allowed = set(await tenancy.notification_recipients(bot, chat_id))
     recipients = sorted(allowed.intersection(admin_user_ids) if admin_user_ids is not None else allowed)
 
     for row in rows:

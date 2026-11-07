@@ -68,6 +68,8 @@ def menu(chat_id: int):
         rows.append([InlineKeyboardButton(text='Веб-панель · получить / обновить пароль', callback_data=f'tenant:panel:{chat_id}:2')])
     if level>=1:
         rows.insert(0,[InlineKeyboardButton(text='⚙️ Настройки этого чата',callback_data=f'cfg:{chat_id}:home')])
+    if level>=2:
+        rows.insert(1,[InlineKeyboardButton(text='👥 Участники, админы и статистика',callback_data=f'tool:{chat_id}:home')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -254,3 +256,5 @@ async def privacy(message):
 
 from chat_settings_tg import router as settings_router
 router.include_router(settings_router)
+from chat_tools_tg import router as tools_router
+router.include_router(tools_router)

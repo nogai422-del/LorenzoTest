@@ -29,7 +29,7 @@ def clean(monkeypatch):
     monkeypatch.setattr(bot_app.bot,'get_chat_administrators',AsyncMock(return_value=[]))
     monkeypatch.setattr(bot_app.bot,'get_chat',AsyncMock(return_value=SimpleNamespace(permissions=None)))
     with db.get_conn() as c:
-        for table in ['dialogue_log','tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
+        for table in ['tenant_operators','tenant_notifications','dialogue_log','tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
             c.execute('DELETE FROM '+table)
 
 
@@ -553,3 +553,119 @@ def test_telegram_settings_patch_preserves_other_fields():
     assert t.settings(-1001)['texts']['welcome_text']=='Hello, {name}!'
     assert t.settings(-1001)['work_start']=='22:00'
     assert t.settings(-1002)['work_start']!='22:00'
+
+
+def mock_chat_roles(monkeypatch):
+    import bot_app
+    from aiogram.types import User
+    def member(cid,uid):
+        status='administrator' if uid==bot_app.bot.id else 'creator' if uid==42 else 'member'
+        return SimpleNamespace(status=status,user=User(id=uid,is_bot=uid==bot_app.bot.id,first_name='User '+str(uid)))
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(side_effect=member))
+    return bot_app.bot
+
+
+def test_delegated_admin_access_stays_in_one_chat(monkeypatch):
+    bot=mock_chat_roles(monkeypatch)
+    grant(-1001);grant(-1002)
+    t.set_operator(-1001,43,42,'Delegate')
+    assert asyncio.run(t.is_chat_admin(bot,-1001,43))
+    assert not asyncio.run(t.is_chat_admin(bot,-1002,43))
+    assert not asyncio.run(t.can_manage_operators(bot,-1001,43))
+    assert asyncio.run(t.can_manage_operators(bot,-1001,42))
+    monkeypatch.setattr(bot,'get_chat_member',AsyncMock(side_effect=lambda cid,uid:SimpleNamespace(status='administrator' if uid==bot.id else 'left')))
+    assert not asyncio.run(t.is_chat_admin(bot,-1001,43))
+
+
+def test_operator_removal_revokes_password_and_session_only_for_that_chat(monkeypatch):
+    from fastapi.testclient import TestClient
+    import web_app
+    mock_chat_roles(monkeypatch)
+    grant(-1001);grant(-1002)
+    db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
+    t.set_operator(-1001,43,42,'Delegate');t.set_operator(-1002,43,42,'Delegate')
+    login,pw=t.issue_credentials(-1001,43)
+    client=TestClient(web_app.app)
+    assert tenant_login(client,login,pw).status_code==200
+    t.set_operator(-1001,43,42,enabled=False)
+    assert client.get('/tenant/-1001').status_code==403
+    assert tenant_login(client,login,pw).status_code==401
+    assert len(t.list_operators(-1002))==1
+
+
+def test_operator_assignment_requires_confirmation_and_manager(monkeypatch):
+    from chat_tools_tg import value,action,Input
+    bot=mock_chat_roles(monkeypatch)
+    grant(-1001)
+    db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
+    state=settings_state(-1001)
+    asyncio.run(state.set_state(Input.value));asyncio.run(state.set_data(dict(tool_chat_id=-1001,operation='add',prompt_id=87,started_at=int(__import__('time').time()))))
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),from_user=SimpleNamespace(id=42),bot=bot,text='43',answer=AsyncMock(),edit_text=AsyncMock())
+    asyncio.run(value(message,state))
+    assert not t.list_operators(-1001)
+    token=asyncio.run(state.get_data())['token']
+    call=SimpleNamespace(data='tool:-1001:apply:'+token,message=message,from_user=SimpleNamespace(id=42),bot=bot,answer=AsyncMock())
+    asyncio.run(action(call,state))
+    assert t.list_operators(-1001)[0]['user_id']==43
+    # Assigned bot operators cannot use a crafted callback to appoint another operator.
+    asyncio.run(state.set_state(Input.confirm));asyncio.run(state.set_data(dict(tool_chat_id=-1001,operation='grant',target_id=44,target_name='Other',token='test',started_at=int(__import__('time').time()))))
+    call.from_user=SimpleNamespace(id=43);call.data='tool:-1001:apply:test'
+    asyncio.run(action(call,state))
+    assert [r['user_id'] for r in t.list_operators(-1001)]==[43]
+
+
+def test_restored_participants_menu_never_shows_other_chat(monkeypatch):
+    from chat_tools_tg import action
+    bot=mock_chat_roles(monkeypatch)
+    grant(-1001);grant(-1002)
+    db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
+    db.record_chat(-1002,'Second',None,'supergroup',1,tracked=True,discovered_by='bot')
+    db.set_joined(-1001,43,'Alice',1);db.set_joined(-1002,44,'Secret Bob',1)
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),bot=bot,answer=AsyncMock(),edit_text=AsyncMock())
+    call=SimpleNamespace(data='tool:-1001:members:active:0',message=message,from_user=SimpleNamespace(id=42),bot=bot,answer=AsyncMock())
+    asyncio.run(action(call,settings_state(-1001)))
+    assert 'Alice' in message.edit_text.call_args.args[0]
+    assert 'Secret Bob' not in message.edit_text.call_args.args[0]
+    t.set_operator(-1001,43,42,'Alice')
+    message.edit_text.reset_mock();call.from_user=SimpleNamespace(id=43);call.data='tool:-1002:members:active:0'
+    asyncio.run(action(call,settings_state(-1001)))
+    message.edit_text.assert_not_called()
+
+
+def test_notifications_and_nudge_templates_are_chat_local(monkeypatch):
+    import bot_app
+    bot=mock_chat_roles(monkeypatch)
+    grant(-1001);grant(-1002)
+    t.set_operator(-1001,43,42,'Alice')
+    t.set_chat_notifications(-1001,43,False)
+    assert not t.notifications_enabled(-1001,43) and t.notifications_enabled(-1002,43)
+    assert 43 not in asyncio.run(t.notification_recipients(bot,-1001))
+    t.patch_chat_settings(-1001,{'nudge_text':'First {name}'})
+    t.patch_chat_settings(-1002,{'nudge_text':'Second {name}'})
+    person={'user_id':43,'user_name':'Alice','username':'alice'}
+    assert bot_app.build_nudge_text(person,-1001)=='First Alice'
+    assert bot_app.build_nudge_text(person,-1002)=='Second Alice'
+
+
+def test_onboarding_levels_change_only_selected_chat(monkeypatch):
+    import bot_app
+    from unittest.mock import AsyncMock
+    grant(-1001,1);grant(-1002,1)
+    t.patch_chat_settings(-1001,{'work_start':'00:00','work_end':'23:59','reply_delay':0,'level':1})
+    message=SimpleNamespace(chat=SimpleNamespace(id=-1001),text='23',caption=None,reply=AsyncMock())
+    state=SimpleNamespace(clear=AsyncMock(),set_state=AsyncMock())
+    token=t.chat_context.set(-1001)
+    try:
+        asyncio.run(bot_app.process_age(message,state))
+        message.reply.assert_not_called()
+        t.patch_chat_settings(-1001,{'level':2})
+        asyncio.run(bot_app.process_age(message,state))
+        message.reply.assert_called_once()
+        message.text='https://example.com'
+        ban=AsyncMock();monkeypatch.setattr(bot_app,'do_ban',ban)
+        assert not asyncio.run(bot_app.maybe_ban_on_suspicious_links(message))
+        t.patch_chat_settings(-1001,{'level':3})
+        assert asyncio.run(bot_app.maybe_ban_on_suspicious_links(message))
+        ban.assert_called_once()
+        assert t.settings(-1002)['level']!=3
+    finally:t.chat_context.reset(token)

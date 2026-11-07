@@ -99,6 +99,14 @@ async def show_settings(message,cid,section='home',replace=False):
         rows=[[button(cid,'🔕 Выключить оповещения' if alerts['enabled'] else '🔔 Включить оповещения','set_alerts:'+('0' if alerts['enabled'] else '1'))]]
         rows += [[button(cid,FIELDS[k][0],'edit:'+k)] for k in ('inactivity_days','min_message_count','repeat_alert_hours','check_interval_minutes')]
         rows.append([button(cid,'‹ Настройки чата','home')])
+    elif section=='levels':
+        text=(heading+f'<b>Уровни сценария</b> · сейчас {cfg["level"]}\n\n'
+              '1 — спросить возраст.\n2 — спросить возраст и согласие на анкету.\n'
+              '3 — возраст, анкета и строгая проверка ссылок/@упоминаний во время онбординга. '
+              'В строгом режиме подозрительное сообщение удаляется, участник блокируется при наличии у бота соответствующих прав.\n\n'
+              'Это сценарии поведения, а не платные тарифы. Уровень меняется только для выбранного чата.')
+        rows=[[button(cid,('✅ ' if cfg['level']==n else '')+f'Уровень {n}',f'level:{n}')] for n in (1,2,3)]
+        rows.append([button(cid,'‹ Настройки чата','home')])
     elif section=='texts':
         text=heading+'<b>Тексты бота</b>\n\n'
         for key in ('welcome_text','consent_text','nudge_text'):
@@ -108,13 +116,18 @@ async def show_settings(message,cid,section='home',replace=False):
     else:
         text=(heading+'<b>Настройки бота в Telegram</b>\n\n'
               f'Онбординг: {"включён" if cfg["is_active"] else "выключен"}\n'
+              f'Уровень сценария: {cfg["level"]}\n'
               f'Часы работы: {html.escape(cfg["work_start"])}–{html.escape(cfg["work_end"])} · МСК\n'
               f'Задержка ответа: {cfg["reply_delay"]} сек.\n\n'
               'Изменения сохраняются только для этого чата. Выберите раздел:')
         rows=[[button(cid,'🔴 Выключить онбординг' if cfg['is_active'] else '🟢 Включить онбординг','set_active:'+('0' if cfg['is_active'] else '1'))],
+              [button(cid,'🎚 Уровни сценария','levels')],
               [button(cid,'✏️ Тексты бота','texts')],
               [button(cid,'🕒 Часы работы','edit:hours'),button(cid,'⏱ Задержка','edit:reply_delay')]]
-        if t.tier(cid)>=2:rows.append([button(cid,'🔔 Неактивность и оповещения','activity')])
+        if t.tier(cid)>=2:
+            rows.append([button(cid,'🔔 Неактивность и оповещения','activity')])
+            from aiogram.types import InlineKeyboardButton
+            rows.append([InlineKeyboardButton(text='👥 Участники, админы и статистика',callback_data=f'tool:{cid}:home')])
         rows.append([InlineKeyboardButton(text='‹ Меню этого чата',callback_data=f'tenant:open:{cid}:0')])
     send=message.edit_text if replace else message.answer
     await send(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -132,8 +145,12 @@ async def settings_callback(call,state:FSMContext):
     await state.clear()
     if action=='cancel':
         await show_settings(call.message,cid,replace=True)
-    elif action in {'home','texts','activity'}:
+    elif action in {'home','texts','activity','levels'}:
         await show_settings(call.message,cid,action,replace=True)
+    elif action in {'level:1','level:2','level:3'}:
+        t.patch_chat_settings(cid,{'level':int(action[-1])})
+        audit('tg:'+str(call.from_user.id),'chat_scenario_level_changed',str(cid),{'level':int(action[-1])})
+        await show_settings(call.message,cid,'levels',replace=True)
     elif action in {'set_active:0','set_active:1'}:
         t.patch_chat_settings(cid,{'is_active':action.endswith(':1')})
         audit('tg:'+str(call.from_user.id),'chat_onboarding_toggled',str(cid))

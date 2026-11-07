@@ -257,15 +257,15 @@ async def notify_admins(text: str) -> None:
     cid = tenancy.chat_context.get()
     if cid is None:
         return
-    for admin_id in await tenancy.refresh_admins(bot, cid):
+    for admin_id in await tenancy.notification_recipients(bot, cid):
         try:
             await bot.send_message(admin_id, text)
         except Exception as exc:
             await botlog(f"notify admin={admin_id} failed: {exc}")
 
 
-def build_nudge_text(member: dict) -> str:
-    settings = current_settings()
+def build_nudge_text(member: dict,chat_id: int | None = None) -> str:
+    settings = tenancy.settings(chat_id,OWNER_ID) if chat_id is not None else current_settings()
     template = str((settings.get("texts") or {}).get("nudge_text") or "{mention}, что молчишь? 🙂")
     user_id = int(member["user_id"])
     name = str(member.get("user_name") or user_id)
@@ -293,7 +293,7 @@ async def send_member_nudge(chat_id: int, user_id: int, actor: str) -> Message:
     member = get_chat_member_stats(int(chat_id), int(user_id))
     if not member or not int(member.get("is_active") or 0) or int(member.get("is_bot") or 0):
         raise ValueError("Участник больше не состоит в выбранной группе")
-    text = build_nudge_text(member)
+    text = build_nudge_text(member,chat_id)
     sent = await bot.send_message(
         int(chat_id),
         text,
@@ -304,7 +304,7 @@ async def send_member_nudge(chat_id: int, user_id: int, actor: str) -> Message:
         actor,
         "member_nudge_sent",
         f"{int(chat_id)}:{int(user_id)}",
-        {"message_id": int(sent.message_id), "template": str((current_settings().get("texts") or {}).get("nudge_text") or "")[:500]},
+        {"message_id": int(sent.message_id), "template": str((tenancy.settings(chat_id,OWNER_ID).get("texts") or {}).get("nudge_text") or "")[:500]},
     )
     return sent
 
@@ -334,7 +334,7 @@ async def do_ban(message: Message, reason: str) -> None:
 
 
 async def maybe_ban_on_suspicious_links(message: Message) -> bool:
-    if tenancy.tier(message.chat.id) < 1:
+    if tenancy.tier(message.chat.id) < 1 or level_value()!=3:
         return False
     text = ((message.text or "") + " " + (message.caption or "")).lower()
     has_username = bool(re.search(r"(^|\s)@[\w_]{5,32}($|\s)", text))
@@ -444,6 +444,9 @@ async def process_age(message: Message, state: FSMContext) -> None:
     age = int(match.group(1))
     if age < 18 or age >= 70:
         await handle_user_failure(message, state, f"Возраст вне диапазона: {age}")
+        return
+    if level_value()==1:
+        await state.clear()
         return
     await typed_delay()
     await message.reply(current_settings()["texts"]["consent_text"].format(age=age))
