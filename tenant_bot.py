@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPri
 import tenancy as t
 from db import get_conn, list_known_chats, record_chat
 from runtime_paths import web_public_url
+from telegram_ui import render,clear_prompt,delete_transient,actor_context
 
 router = Router(name='tenant_commands')
 
@@ -38,6 +39,7 @@ class ChatBoundaryMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         chat = getattr(event, 'chat', None) or getattr(getattr(event, 'message', None), 'chat', None)
         token = t.chat_context.set(int(chat.id) if chat and chat.type in {'group','supergroup'} else None)
+        actor_token=actor_context.set(getattr(getattr(event,'from_user',None),'id',None))
         try:
             if chat and chat.type in {'group','supergroup'}:
                 from bot_permissions import has_admin_rights,warn
@@ -54,6 +56,7 @@ class ChatBoundaryMiddleware(BaseMiddleware):
             return await handler(event, data)
         finally:
             t.chat_context.reset(token)
+            actor_context.reset(actor_token)
 
 
 def menu(chat_id: int):
@@ -75,7 +78,9 @@ def menu(chat_id: int):
 
 @router.message(Command('start','admin','settings','activity','members','donate','tariffs'))
 async def home(message: Message,state:FSMContext=None):
-    if state:await state.clear()
+    if state:
+        await clear_prompt(message,await state.get_data())
+        await state.clear()
     if message.chat.type in {'group','supergroup'}:
         chat_id = int(message.chat.id)
         record_chat(chat_id, message.chat.title, message.chat.username, message.chat.type, int(time.time()), tracked=True, discovered_by='bot')
@@ -84,6 +89,7 @@ async def home(message: Message,state:FSMContext=None):
             return
         await t.refresh_admins(message.bot, chat_id)
         await show_menu(message, chat_id)
+        await delete_transient(message.bot,message.chat.id,message.message_id)
         return
     rows = []
     # Never show another chat's title before a live membership check.
@@ -91,21 +97,22 @@ async def home(message: Message,state:FSMContext=None):
         cid = int(chat['chat_id'])
         if await t.is_chat_admin(message.bot, cid, message.from_user.id):
             rows.append([InlineKeyboardButton(text=chat['title'] or str(cid), callback_data=f'tenant:open:{cid}:0')])
-    await message.answer('Выберите свой чат. Для подключения нового чата вызовите /admin внутри него.', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message,'Выберите свой чат. Для подключения нового чата вызовите /admin внутри него.',InlineKeyboardMarkup(inline_keyboard=rows),fresh=True)
+    await delete_transient(message.bot,message.chat.id,message.message_id)
 
 
-async def show_menu(message, chat_id):
+async def show_menu(message, chat_id,replace=False):
     level = t.tier(chat_id)
     from db import get_chat_info
     name=html.escape((get_chat_info(chat_id) or {}).get('title') or str(chat_id))
-    await message.answer(
+    await render(message,
         f'<b>Лоренцо · {name}</b>\nID: <code>{chat_id}</code>\n'
         f'Уровень: {level}\n\nБесплатно: возраст и согласие на анкету.\n'
         f'1 · Редактирование: {t.star_price(1)} ⭐ разово (ориентир 50 ₽).\n'
         f'2 · Полный доступ: {t.star_price(2)} ⭐ разово (ориентир 100 ₽), включает уровень 1, активность, веб-панель и свой Telethon.\n'
         'Цена Stars в рублях зависит от способа покупки. Оплата действует на один чат.\n'
         '⚙️ Настройки меняются кнопками прямо здесь, в Telegram, отдельно для выбранного чата.\n'
-        '/terms — условия, /paysupport — поддержка.', reply_markup=menu(chat_id))
+        '/terms — условия, /paysupport — поддержка.', reply_markup=menu(chat_id),replace=replace,fresh=not replace)
 
 
 @router.callback_query(F.data.startswith('tenant:'))
@@ -127,8 +134,10 @@ async def action(call: CallbackQuery,state:FSMContext=None):
         await call.answer('Бот приостановлен: сначала назначьте Лоренцо администратором группы.',show_alert=True)
         return
     if action == 'open':
-        if state:await state.clear()
-        await show_menu(call.message, chat_id)
+        if state:
+            await clear_prompt(call.message,await state.get_data())
+            await state.clear()
+        await show_menu(call.message, chat_id,replace=True)
     elif action == 'panel':
         if t.tier(chat_id) < 2:
             await call.answer('Требуется полный доступ', show_alert=True)
@@ -218,7 +227,9 @@ async def edit(message):
         else:
             raise ValueError('Доступны welcome_text, consent_text, nudge_text, reply_delay, is_active, work_start, work_end')
         t.save_chat_settings(cid,cfg)
-        await message.answer('Настройки этого чата сохранены.')
+        from chat_settings_tg import show_settings
+        await show_settings(message,cid,notice='✅ Настройки этого чата сохранены.')
+        await delete_transient(message.bot,message.chat.id,message.message_id)
     except (ValueError,IndexError) as exc:
         await message.answer(html.escape(str(exc)) or 'Проверьте команду /edit')
 

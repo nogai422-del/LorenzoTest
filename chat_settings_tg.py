@@ -12,6 +12,7 @@ from aiogram.fsm.state import State,StatesGroup
 from aiogram.types import InlineKeyboardButton,InlineKeyboardMarkup,ForceReply
 from db import get_chat_info,get_chat_settings,set_chat_settings,audit
 import tenancy as t
+from telegram_ui import render,clear_prompt,input_error
 
 router=Router(name='chat_settings_telegram')
 
@@ -84,7 +85,7 @@ def save_value(cid,key,value):
         t.patch_chat_settings(cid,changes)
 
 
-async def show_settings(message,cid,section='home',replace=False):
+async def show_settings(message,cid,section='home',replace=False,notice=''):
     cfg=t.settings(cid)
     heading=f'⚙️ <b>{title(cid)}</b>\n'
     if section=='activity':
@@ -95,7 +96,7 @@ async def show_settings(message,cid,section='home',replace=False):
               f'Минимум сообщений за период: {alerts["min_message_count"]}\n'
               f'Повтор оповещения: {alerts["repeat_alert_hours"]} ч.\n'
               f'Проверка каждые: {alerts["check_interval_minutes"]} мин.\n\n'
-              'Получатели — текущие администраторы именно этого чата.')
+              'Получатели — администраторы Лоренцо именно этого чата. Личные оповещения обновляются одной сводкой, а не отдельными сообщениями на каждого участника.')
         rows=[[button(cid,'🔕 Выключить оповещения' if alerts['enabled'] else '🔔 Включить оповещения','set_alerts:'+('0' if alerts['enabled'] else '1'))]]
         rows += [[button(cid,FIELDS[k][0],'edit:'+k)] for k in ('inactivity_days','min_message_count','repeat_alert_hours','check_interval_minutes')]
         rows.append([button(cid,'‹ Настройки чата','home')])
@@ -129,8 +130,7 @@ async def show_settings(message,cid,section='home',replace=False):
             from aiogram.types import InlineKeyboardButton
             rows.append([InlineKeyboardButton(text='👥 Участники, админы и статистика',callback_data=f'tool:{cid}:home')])
         rows.append([InlineKeyboardButton(text='‹ Меню этого чата',callback_data=f'tenant:open:{cid}:0')])
-    send=message.edit_text if replace else message.answer
-    await send(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message,(html.escape(notice)+"\n\n" if notice else "")+text,InlineKeyboardMarkup(inline_keyboard=rows),replace=replace)
 
 
 @router.callback_query(F.data.startswith('cfg:'))
@@ -142,6 +142,7 @@ async def settings_callback(call,state:FSMContext):
     activity=(action=='activity' or action.startswith('set_alerts:')) or action.removeprefix('edit:') in ACTIVITY_FIELDS
     if not call.message or not await permitted(call.bot,cid,call.from_user.id,call.message.chat.id,call.message.chat.type,2 if activity else 1):
         await call.answer('Нет доступа: нужны права администратора этого чата и соответствующий тариф.',show_alert=True);return
+    await clear_prompt(call.message,await state.get_data())
     await state.clear()
     if action=='cancel':
         await show_settings(call.message,cid,replace=True)
@@ -171,8 +172,12 @@ async def settings_callback(call,state:FSMContext):
 
 @router.message(StateFilter(Editing.value),Command('cancel'))
 async def cancel_edit(message,state:FSMContext):
+    data=await state.get_data()
     await state.clear()
-    await message.answer('Изменение отменено. /admin — выбрать чат и открыть настройки.')
+    cid=data.get('settings_chat_id')
+    if cid and await permitted(message.bot,cid,message.from_user.id,message.chat.id,message.chat.type):
+        await show_settings(message,cid,notice='Изменение отменено.')
+    await clear_prompt(message,data,include_input=True)
 
 
 @router.message(StateFilter(Editing.value),F.text & ~F.text.startswith('/'))
@@ -187,9 +192,9 @@ async def settings_value(message,state:FSMContext):
         await state.clear();await message.answer('Изменения не сохранены: доступ к выбранному чату отозван.');return
     try:value=parse_value(key,message.text)
     except ValueError as exc:
-        await message.answer(html.escape(str(exc))+'\nОтправьте исправленное значение или /cancel.');return
+        await input_error(message,html.escape(str(exc)),f'cfg:{cid}:cancel');return
     save_value(cid,key,value)
     audit('tg:'+str(message.from_user.id),'chat_setting_changed',str(cid),{'field':key})
     await state.clear()
-    await message.answer(f'✅ <b>{title(cid)}</b>: настройка «{FIELDS[key][0]}» сохранена.')
-    await show_settings(message,cid,'activity' if key in ACTIVITY_FIELDS else 'texts' if key.endswith('_text') else 'home')
+    await show_settings(message,cid,'activity' if key in ACTIVITY_FIELDS else 'texts' if key.endswith('_text') else 'home',notice='✅ Настройка «'+FIELDS[key][0]+'» сохранена.')
+    await clear_prompt(message,data,include_input=True)

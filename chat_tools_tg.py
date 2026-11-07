@@ -10,6 +10,7 @@ from aiogram.fsm.state import State,StatesGroup
 from aiogram.types import InlineKeyboardMarkup,ForceReply
 from aiogram.dispatcher.event.bases import UNHANDLED
 import tenancy as t
+from telegram_ui import render,clear_prompt,input_error
 from db import get_conn,dashboard_stats,list_members_for_web,list_inactive_members_for_web,get_chat_member_stats,request_sync,audit
 from chat_settings_tg import permitted,title
 
@@ -29,7 +30,7 @@ def b(cid,label,action):
 
 async def show(message,cid,text,rows,replace=True):
     rows.append([b(cid,'‹ Участники и управление','home')])
-    await (message.edit_text if replace else message.answer)(f'<b>{title(cid)}</b>\n\n'+text,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message,f'<b>{title(cid)}</b>\n\n'+text,InlineKeyboardMarkup(inline_keyboard=rows),replace=replace)
 
 
 async def tools_home(message,cid,replace=True):
@@ -41,7 +42,7 @@ async def tools_home(message,cid,replace=True):
           [b(cid,'🔄 Синхронизация','sync')]]
     from aiogram.types import InlineKeyboardButton
     rows.append([InlineKeyboardButton(text='‹ Настройки чата',callback_data=f'cfg:{cid}:home')])
-    await (message.edit_text if replace else message.answer)(f'<b>{title(cid)}</b>\n\nУчастники, статистика, администраторы и уведомления — только этого чата.',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message,f'<b>{title(cid)}</b>\n\nУчастники, статистика, администраторы и уведомления — только этого чата.',InlineKeyboardMarkup(inline_keyboard=rows),replace=replace)
 
 
 async def members(message,cid,kind='active',page=0,search='',replace=True):
@@ -142,6 +143,7 @@ async def action(call,state:FSMContext):
         except ValueError:await call.answer('Некорректная страница',show_alert=True);return
         await members(call.message,cid,page=page,search=data['search'])
         await call.answer();return
+    await clear_prompt(call.message,await state.get_data())
     await state.clear()
     if action=='home':await tools_home(call.message,cid)
     elif action=='stats':
@@ -223,7 +225,11 @@ async def action(call,state:FSMContext):
 
 @router.message(StateFilter(Input.value,Input.confirm,Input.results),Command('cancel'))
 async def cancel(message,state:FSMContext):
-    await state.clear();await message.answer('Действие отменено. /admin — управление чатами.')
+    data=await state.get_data()
+    await state.clear()
+    cid=data.get('tool_chat_id')
+    if cid and await permitted(message.bot,cid,message.from_user.id,message.chat.id,message.chat.type,2):await tools_home(message,cid,replace=False)
+    await clear_prompt(message,data,include_input=True)
 
 
 @router.message(StateFilter(Input.value),F.text & ~F.text.startswith('/'))
@@ -238,7 +244,8 @@ async def value(message,state:FSMContext):
     if operation=='search':
         await state.set_state(Input.results)
         await state.set_data(dict(tool_chat_id=cid,operation='search_results',search=text.lstrip('@'),started_at=int(time.time())))
-        await members(message,cid,search=text.lstrip('@'),replace=False);return
+        await members(message,cid,search=text.lstrip('@'),replace=False)
+        await clear_prompt(message,data,include_input=True);return
     if operation!='add' or not await t.can_manage_operators(message.bot,cid,message.from_user.id):
         await state.clear();await message.answer('Нет прав управлять администраторами этого чата.');return
     uid=None
@@ -247,16 +254,17 @@ async def value(message,state:FSMContext):
         with get_conn() as c:row=c.execute('SELECT user_id FROM chat_members WHERE chat_id=? AND LOWER(username)=LOWER(?) AND is_active=1',(cid,text[1:])).fetchone()
         if row:uid=int(row['user_id'])
     if not uid or uid<=0:
-        await message.answer('Участник не найден в этом чате. Укажите его числовой Telegram ID или /cancel.');return
+        await input_error(message,'Участник не найден в этом чате. Укажите его числовой Telegram ID.',f'tool:{cid}:home');return
     try:target=await message.bot.get_chat_member(cid,uid)
     except Exception:
-        await message.answer('Telegram не подтвердил участие пользователя в выбранном чате.');return
+        await input_error(message,'Telegram не подтвердил участие пользователя в выбранном чате.',f'tool:{cid}:home');return
     if not t.present_member(target) or target.user.is_bot:
-        await message.answer('Назначить можно только человека, состоящего в выбранном чате.');return
+        await input_error(message,'Назначить можно только человека, состоящего в выбранном чате.',f'tool:{cid}:home');return
     if target.status in {'creator','administrator'}:
         await state.clear();await message.answer('Этот пользователь уже имеет доступ как администратор Telegram-группы.');return
     # The confirmation callback is bound to this user's FSM, chat, target and short-lived nonce.
     token=secrets.token_hex(5)
     await state.set_state(Input.confirm)
     await state.set_data(dict(tool_chat_id=cid,operation='grant',target_id=uid,target_name=target.user.full_name,token=token,started_at=int(time.time())))
-    await message.answer(f'<b>{title(cid)}</b>\n\nНазначить {html.escape(target.user.full_name)} администратором Лоренцо только этого чата? Он сможет менять настройки, смотреть участников и получать пароль к веб-панели. Права Telegram-группы не изменятся.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[b(cid,'✅ Назначить','apply:'+token),b(cid,'Отмена','home')]]))
+    await render(message,f'<b>{title(cid)}</b>\n\nНазначить {html.escape(target.user.full_name)} администратором Лоренцо только этого чата? Он сможет менять настройки, смотреть участников и получать пароль к веб-панели. Права Telegram-группы не изменятся.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[b(cid,'✅ Назначить','apply:'+token),b(cid,'Отмена','home')]]))
+    await clear_prompt(message,data,include_input=True)

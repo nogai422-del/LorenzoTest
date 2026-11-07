@@ -27,9 +27,10 @@ def clean(monkeypatch):
     bot_permissions._notices.clear()
     monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(return_value=SimpleNamespace(status='administrator')))
     monkeypatch.setattr(bot_app.bot,'get_chat_administrators',AsyncMock(return_value=[]))
+    monkeypatch.setattr(bot_app.bot,'delete_message',AsyncMock())
     monkeypatch.setattr(bot_app.bot,'get_chat',AsyncMock(return_value=SimpleNamespace(permissions=None)))
     with db.get_conn() as c:
-        for table in ['tenant_operators','tenant_notifications','dialogue_log','tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
+        for table in ['tenant_ui_windows','inactivity_cards','tenant_operators','tenant_notifications','dialogue_log','tenant_credentials','tenant_config','tenant_admins','tenant_tickets','tenant_orders','chats','chat_members','sync_requests']:
             c.execute('DELETE FROM '+table)
 
 
@@ -478,7 +479,7 @@ def test_telegram_settings_toggle_changes_only_selected_chat():
     from chat_settings_tg import settings_callback
     grant(-1001);grant(-1002)
     db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
-    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),answer=AsyncMock(),edit_text=AsyncMock())
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),bot=bot_app.bot,answer=AsyncMock(),edit_text=AsyncMock())
     call=SimpleNamespace(data='cfg:-1001:set_active:0',message=message,from_user=SimpleNamespace(id=42),bot=bot_app.bot,answer=AsyncMock())
     asyncio.run(settings_callback(call,settings_state(-1001)))
     assert not t.settings(-1001)['is_active']
@@ -520,7 +521,7 @@ def test_telegram_settings_inactivity_requires_full_tier():
     from chat_settings_tg import settings_callback
     grant(-1001,1)
     db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
-    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),answer=AsyncMock(),edit_text=AsyncMock())
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),bot=bot_app.bot,answer=AsyncMock(),edit_text=AsyncMock())
     call=SimpleNamespace(data='cfg:-1001:set_alerts:0',message=message,from_user=SimpleNamespace(id=42),bot=bot_app.bot,answer=AsyncMock())
     before=db.get_chat_settings(-1001)['enabled']
     asyncio.run(settings_callback(call,settings_state(-1001)))
@@ -669,3 +670,61 @@ def test_onboarding_levels_change_only_selected_chat(monkeypatch):
         ban.assert_called_once()
         assert t.settings(-1002)['level']!=3
     finally:t.chat_context.reset(token)
+
+
+def test_single_menu_controller_and_only_tracked_menu_cleanup():
+    from telegram_ui import render,actor_context
+    bot=SimpleNamespace(delete_message=AsyncMock(),edit_message_text=AsyncMock())
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),from_user=SimpleNamespace(id=42),message_id=90,bot=bot,answer=AsyncMock(side_effect=[SimpleNamespace(message_id=100),SimpleNamespace(message_id=101)]))
+    asyncio.run(render(message,'Menu one',None,fresh=True))
+    asyncio.run(render(message,'Menu two',None,fresh=True))
+    bot.delete_message.assert_called_once_with(42,100)
+    callback_message=SimpleNamespace(chat=message.chat,from_user=SimpleNamespace(id=123),message_id=101,bot=bot,answer=AsyncMock(),edit_text=AsyncMock(return_value=SimpleNamespace(message_id=101)))
+    token=actor_context.set(42)
+    try:asyncio.run(render(callback_message,'Another section',None,replace=True))
+    finally:actor_context.reset(token)
+    callback_message.answer.assert_not_called()
+    callback_message.edit_text.assert_called_once()
+    with db.get_conn() as c:assert c.execute('SELECT message_id FROM tenant_ui_windows WHERE conversation_id=42 AND user_id=42').fetchone()['message_id']==101
+
+
+def test_group_menu_controllers_are_separate_for_each_admin():
+    from telegram_ui import render,actor_context
+    bot=SimpleNamespace(delete_message=AsyncMock())
+    message=SimpleNamespace(chat=SimpleNamespace(id=-1001,type='supergroup'),message_id=90,bot=bot,answer=AsyncMock(side_effect=[SimpleNamespace(message_id=100),SimpleNamespace(message_id=101)]))
+    for uid in (42,43):
+        token=actor_context.set(uid)
+        try:asyncio.run(render(message,'Menu',None,fresh=True))
+        finally:actor_context.reset(token)
+    bot.delete_message.assert_not_called()
+    with db.get_conn() as c:assert c.execute('SELECT COUNT(*) FROM tenant_ui_windows WHERE conversation_id=-1001').fetchone()[0]==2
+
+
+def test_inactivity_digest_reuses_one_card_for_all_participants(monkeypatch):
+    import inactivity
+    grant(-1001)
+    now=int(__import__('time').time())
+    db.record_chat(-1001,'First',None,'supergroup',now,tracked=True,discovered_by='bot')
+    for uid in range(100,120):db.set_joined(-1001,uid,'Person '+str(uid),now-10*86400)
+    bot=SimpleNamespace(id=123,get_chat_member=AsyncMock(return_value=SimpleNamespace(status='administrator')),send_message=AsyncMock(return_value=SimpleNamespace(message_id=700)),edit_message_text=AsyncMock())
+    monkeypatch.setattr(t,'notification_recipients',AsyncMock(return_value=[42]))
+    log=AsyncMock()
+    asyncio.run(inactivity.check_chat_now(bot,-1001,None,log,force=True))
+    asyncio.run(inactivity.check_chat_now(bot,-1001,None,log,force=True))
+    bot.send_message.assert_called_once()
+    bot.edit_message_text.assert_called_once()
+    assert 'Сводка неактивности' in bot.send_message.call_args.args[1]
+    assert '<b>20</b>' in bot.send_message.call_args.args[1]
+    assert len(bot.send_message.call_args.args[1])<4096
+    assert bot.edit_message_text.call_args.kwargs['message_id']==700
+
+
+def test_inactivity_cards_are_separate_by_chat_and_recipient():
+    from inactivity import update_digest
+    bot=SimpleNamespace(send_message=AsyncMock(side_effect=[SimpleNamespace(message_id=700),SimpleNamespace(message_id=701)]),edit_message_text=AsyncMock())
+    asyncio.run(update_digest(bot,-1001,42,'First chat'))
+    asyncio.run(update_digest(bot,-1002,42,'Second chat'))
+    asyncio.run(update_digest(bot,-1001,42,'First updated'))
+    assert bot.send_message.call_count==2
+    assert bot.edit_message_text.call_args.kwargs['message_id']==700
+    with db.get_conn() as c:assert c.execute('SELECT message_id FROM inactivity_cards WHERE chat_id=-1002 AND user_id=42').fetchone()['message_id']==701

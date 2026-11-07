@@ -41,6 +41,12 @@ def init_tenancy():
         CREATE TABLE IF NOT EXISTS tenant_notifications (
             chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(chat_id,user_id));
+        CREATE TABLE IF NOT EXISTS tenant_ui_windows (
+            conversation_id INTEGER NOT NULL,user_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+            PRIMARY KEY(conversation_id,user_id));
+        CREATE TABLE IF NOT EXISTS inactivity_cards (
+            chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+            PRIMARY KEY(chat_id,user_id));
         ''')
 
 
