@@ -3,6 +3,7 @@ import html
 import time
 from aiogram import BaseMiddleware, Router, F
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, CallbackQuery
 import tenancy as t
 from db import get_conn, list_known_chats, record_chat
@@ -65,11 +66,14 @@ def menu(chat_id: int):
         rows.append([InlineKeyboardButton(text=f'Полный доступ · {max(1,price)} ⭐', callback_data=f'tenant:buy:{chat_id}:2')])
     if level >= 2:
         rows.append([InlineKeyboardButton(text='Веб-панель · получить / обновить пароль', callback_data=f'tenant:panel:{chat_id}:2')])
+    if level>=1:
+        rows.insert(0,[InlineKeyboardButton(text='⚙️ Настройки этого чата',callback_data=f'cfg:{chat_id}:home')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(Command('start','admin','activity','members','donate','tariffs'))
-async def home(message: Message):
+@router.message(Command('start','admin','settings','activity','members','donate','tariffs'))
+async def home(message: Message,state:FSMContext=None):
+    if state:await state.clear()
     if message.chat.type in {'group','supergroup'}:
         chat_id = int(message.chat.id)
         record_chat(chat_id, message.chat.title, message.chat.username, message.chat.type, int(time.time()), tracked=True, discovered_by='bot')
@@ -90,19 +94,20 @@ async def home(message: Message):
 
 async def show_menu(message, chat_id):
     level = t.tier(chat_id)
+    from db import get_chat_info
+    name=html.escape((get_chat_info(chat_id) or {}).get('title') or str(chat_id))
     await message.answer(
-        f'<b>Лоренцо · управление чатом</b>\nID: <code>{chat_id}</code>\n'
+        f'<b>Лоренцо · {name}</b>\nID: <code>{chat_id}</code>\n'
         f'Уровень: {level}\n\nБесплатно: возраст и согласие на анкету.\n'
         f'1 · Редактирование: {t.star_price(1)} ⭐ разово (ориентир 50 ₽).\n'
         f'2 · Полный доступ: {t.star_price(2)} ⭐ разово (ориентир 100 ₽), включает уровень 1, активность, веб-панель и свой Telethon.\n'
         'Цена Stars в рублях зависит от способа покупки. Оплата действует на один чат.\n'
-        'Настройки: <code>/edit reply_delay 2</code>, <code>/edit welcome_text Привет, {name}!</code>\n'
-        'В личном чате: <code>/edit ID_ЧАТА параметр значение</code>.\n'
+        '⚙️ Настройки меняются кнопками прямо здесь, в Telegram, отдельно для выбранного чата.\n'
         '/terms — условия, /paysupport — поддержка.', reply_markup=menu(chat_id))
 
 
 @router.callback_query(F.data.startswith('tenant:'))
-async def action(call: CallbackQuery):
+async def action(call: CallbackQuery,state:FSMContext=None):
     try:
         _, action, cid, level = call.data.split(':')
         chat_id, level = int(cid), int(level)
@@ -120,6 +125,7 @@ async def action(call: CallbackQuery):
         await call.answer('Бот приостановлен: сначала назначьте Лоренцо администратором группы.',show_alert=True)
         return
     if action == 'open':
+        if state:await state.clear()
         await show_menu(call.message, chat_id)
     elif action == 'panel':
         if t.tier(chat_id) < 2:
@@ -244,3 +250,7 @@ async def privacy(message):
         f'Срок хранения — {retention_days()} дней. Журнал доступен только создателю бота; администраторы других чатов его не видят. '
         'Личные сообщения пользователей боту в журнал не записываются. Медиафайлы для журнала не скачиваются. '
         'Telegram не сообщает боту обо всех удалениях, поэтому журнал не подтверждает, что сообщение всё ещё есть в группе.')
+
+
+from chat_settings_tg import router as settings_router
+router.include_router(settings_router)

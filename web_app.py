@@ -45,7 +45,7 @@ from db import (
     set_chat_hidden,
     set_admin_web_credentials,
 )
-from settings_store import load_settings, save_settings
+from tenancy import settings as load_chat_config, save_chat_settings, HOME_CHAT_ID
 from telethon_auth import TelethonAuthError, TelethonAuthManager
 from telethon_config import load_telethon_config, telethon_status
 from telegram_identity import UsernameResolveError, resolve_user_by_username
@@ -679,7 +679,7 @@ async def bot_settings_page(request: Request, msg: str | None = None):
     return render(
         request,
         "bot_settings.html",
-        settings=load_settings(OWNER_ID),
+        settings=load_chat_config(HOME_CHAT_ID, OWNER_ID),
         chats=list_known_chats(include_untracked=False),
         admins=list_system_admins(),
         msg=msg,
@@ -700,7 +700,7 @@ async def bot_settings_save(
     nudge_text: str = Form(...),
 ):
     verify_csrf(request, csrf)
-    current = load_settings(OWNER_ID)
+    current = load_chat_config(HOME_CHAT_ID, OWNER_ID)
     current.update(
         {
             "is_active": bool(is_active),
@@ -715,7 +715,7 @@ async def bot_settings_save(
             },
         }
     )
-    save_settings(current, OWNER_ID)
+    save_chat_settings(HOME_CHAT_ID, current)
     audit(_actor(request), "bot_settings")
     return redirect("/bot", "Настройки бота сохранены")
 

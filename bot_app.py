@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -214,7 +214,7 @@ def is_time_active_now() -> bool:
         end = parse_hhmm(settings["work_end"])
     except Exception:
         return False
-    now = datetime.now().time()
+    now = datetime.now(timezone(timedelta(hours=3))).time()
     return start <= now <= end if start <= end else (now >= start or now <= end)
 
 
@@ -894,12 +894,13 @@ async def admin_bot_toggle(call: CallbackQuery) -> None:
 async def refresh_admin_commands() -> None:
     current: set[int] = set()
     admin_commands = [
-        BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="admin", description="Выбрать чат и открыть управление"),
+        BotCommand(command="settings", description="Настройки своего чата"),
         BotCommand(command="members", description="Участники групп"),
         BotCommand(command="activity", description="Статистика активности"),
     ]
     try:
-        await bot.delete_my_commands(scope=BotCommandScopeDefault())
+        await bot.set_my_commands([BotCommand(command="admin", description="Управление своими чатами"), BotCommand(command="settings", description="Настройки выбранного чата"), BotCommand(command="tariffs", description="Тарифы"), BotCommand(command="privacy", description="Обработка данных")],scope=BotCommandScopeDefault())
     except Exception as exc:
         await botlog(f"clear default commands failed: {exc}")
 

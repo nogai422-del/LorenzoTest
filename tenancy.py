@@ -67,6 +67,24 @@ def save_chat_settings(chat_id: int, value: dict):
                   (int(chat_id), json.dumps(value, ensure_ascii=False)))
 
 
+def patch_chat_settings(chat_id: int,changes: dict):
+    """Merge a Telegram edit with the latest chat settings in one transaction."""
+    if tier(chat_id)<1:raise PermissionError('Требуется уровень Редактирование')
+    fallback=settings(chat_id)
+    with get_conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT settings FROM tenant_config WHERE chat_id=?',(chat_id,)).fetchone()
+        current=normalize_settings(json.loads(row['settings']),0) if row else fallback
+        for key,value in changes.items():
+            if key in {'welcome_text','consent_text','nudge_text'}:current['texts'][key]=value
+            elif key in {'is_active','work_start','work_end','reply_delay'}:current[key]=value
+            else:raise ValueError('Unknown setting')
+        current=normalize_settings(current,0)
+        c.execute('INSERT INTO tenant_config(chat_id,settings) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET settings=excluded.settings',
+                  (chat_id,json.dumps(current,ensure_ascii=False)))
+    return current
+
+
 async def is_chat_admin(bot, chat_id: int, user_id: int) -> bool:
     from bot_permissions import has_admin_rights
     if not await has_admin_rights(bot,chat_id,fresh=True):

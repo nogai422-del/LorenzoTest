@@ -453,3 +453,103 @@ def test_dispatcher_journals_unhandled_group_messages_and_edits():
     asyncio.run(bot_app.dp.feed_update(bot_app.bot,Update(update_id=10002,edited_message=sample_dialogue(text='Edited dialogue',edit_date=int(__import__('time').time())))))
     assert query_messages(-1001)[0]['text']=='Edited dialogue'
     assert 'edited_message' in bot_app.dp.resolve_used_update_types()
+
+
+def settings_state(cid,field='reply_delay',conversation=42):
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.memory import MemoryStorage
+    from aiogram.fsm.storage.base import StorageKey
+    from chat_settings_tg import Editing
+    state=FSMContext(storage=MemoryStorage(),key=StorageKey(bot_id=123,chat_id=conversation,user_id=42))
+    asyncio.run(state.set_state(Editing.value))
+    asyncio.run(state.update_data(settings_chat_id=cid,settings_field=field,prompt_id=87,started_at=int(__import__('time').time())))
+    return state
+
+
+def test_telegram_settings_button_scoped_to_chat():
+    from tenant_bot import menu
+    grant(-1001,1)
+    assert any(b.callback_data=='cfg:-1001:home' for r in menu(-1001).inline_keyboard for b in r)
+    assert not any(b.callback_data.startswith('cfg:') for r in menu(-1002).inline_keyboard for b in r)
+
+
+def test_telegram_settings_toggle_changes_only_selected_chat():
+    import bot_app
+    from chat_settings_tg import settings_callback
+    grant(-1001);grant(-1002)
+    db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),answer=AsyncMock(),edit_text=AsyncMock())
+    call=SimpleNamespace(data='cfg:-1001:set_active:0',message=message,from_user=SimpleNamespace(id=42),bot=bot_app.bot,answer=AsyncMock())
+    asyncio.run(settings_callback(call,settings_state(-1001)))
+    assert not t.settings(-1001)['is_active']
+    assert t.settings(-1002)['is_active']
+    assert 'First' in message.edit_text.call_args.args[0]
+
+
+def test_telegram_settings_reject_other_group_callback():
+    import bot_app
+    from chat_settings_tg import settings_callback
+    grant(-1001)
+    db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
+    message=SimpleNamespace(chat=SimpleNamespace(id=-1002,type='supergroup'),answer=AsyncMock(),edit_text=AsyncMock())
+    call=SimpleNamespace(data='cfg:-1001:set_active:0',message=message,from_user=SimpleNamespace(id=42),bot=bot_app.bot,answer=AsyncMock())
+    asyncio.run(settings_callback(call,settings_state(-1001)))
+    assert t.settings(-1001)['is_active']
+    assert call.answer.call_args.kwargs['show_alert']
+    message.edit_text.assert_not_called()
+
+
+def test_telegram_settings_text_save_and_revocation(monkeypatch):
+    import bot_app
+    from chat_settings_tg import settings_value
+    grant(-1001);grant(-1002)
+    db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),from_user=SimpleNamespace(id=42),bot=bot_app.bot,text='Привет, {name}!',answer=AsyncMock())
+    state=settings_state(-1001,'welcome_text')
+    asyncio.run(settings_value(message,state))
+    assert t.settings(-1001)['texts']['welcome_text']=='Привет, {name}!'
+    assert t.settings(-1002)['texts']['welcome_text']!='Привет, {name}!'
+    monkeypatch.setattr(bot_app.bot,'get_chat_member',AsyncMock(side_effect=lambda cid,uid:SimpleNamespace(status='administrator' if uid==bot_app.bot.id else 'member')))
+    message.text='12'
+    asyncio.run(settings_value(message,settings_state(-1001)))
+    assert t.settings(-1001)['reply_delay']!=12
+
+
+def test_telegram_settings_inactivity_requires_full_tier():
+    import bot_app
+    from chat_settings_tg import settings_callback
+    grant(-1001,1)
+    db.record_chat(-1001,'First',None,'supergroup',1,tracked=True,discovered_by='bot')
+    message=SimpleNamespace(chat=SimpleNamespace(id=42,type='private'),answer=AsyncMock(),edit_text=AsyncMock())
+    call=SimpleNamespace(data='cfg:-1001:set_alerts:0',message=message,from_user=SimpleNamespace(id=42),bot=bot_app.bot,answer=AsyncMock())
+    before=db.get_chat_settings(-1001)['enabled']
+    asyncio.run(settings_callback(call,settings_state(-1001)))
+    assert db.get_chat_settings(-1001)['enabled']==before
+    assert call.answer.call_args.kwargs['show_alert']
+
+
+def test_telegram_group_edit_requires_reply_to_prompt():
+    import bot_app
+    from chat_settings_tg import settings_value
+    from aiogram.dispatcher.event.bases import UNHANDLED
+    grant(-1001)
+    state=settings_state(-1001,conversation=-1001)
+    message=SimpleNamespace(chat=SimpleNamespace(id=-1001,type='supergroup'),from_user=SimpleNamespace(id=42),bot=bot_app.bot,text='123',reply_to_message=None,answer=AsyncMock())
+    assert asyncio.run(settings_value(message,state)) is UNHANDLED
+    assert t.settings(-1001)['reply_delay']!=123
+    message.answer.assert_not_called()
+
+
+@pytest.mark.parametrize('key,value',[('hours','99:00–19:00'),('reply_delay','-1'),('welcome_text','{name.__class__}'),('consent_text','{age!r}'),('inactivity_days','0')])
+def test_telegram_settings_validates_input(key,value):
+    from chat_settings_tg import parse_value
+    with pytest.raises(ValueError):parse_value(key,value)
+
+
+def test_telegram_settings_patch_preserves_other_fields():
+    grant(-1001,1);grant(-1002,1)
+    t.patch_chat_settings(-1001,{'welcome_text':'Hello, {name}!'})
+    t.patch_chat_settings(-1001,{'work_start':'22:00','work_end':'07:00'})
+    assert t.settings(-1001)['texts']['welcome_text']=='Hello, {name}!'
+    assert t.settings(-1001)['work_start']=='22:00'
+    assert t.settings(-1002)['work_start']!='22:00'
